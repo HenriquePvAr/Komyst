@@ -18065,7 +18065,7 @@ def _draw_multiline_per_font(draw, origin, lines, plan, *, fill, spacing, stroke
         y += h + spacing
 
 
-def _balloon_text_area(group, image_shape):
+def _balloon_text_area(group, image_shape, source_bgr=None):
     """Where translated text may sit inside a closed balloon/box, or ``None``.
 
     The interior measured during cleanup (``light_enclosure_interior``), inset by
@@ -18074,6 +18074,13 @@ def _balloon_text_area(group, image_shape):
     text on art: the rectangle fit is kept there.
     """
     interior = getattr(group, "light_enclosure_interior", None)
+    if config.BUBBLE_DETECTOR_ENABLED and source_bgr is not None and tuple(source_bgr.shape[:2]) == tuple(image_shape[:2]):
+        # A trained detector finds balloons the white-interior test misses (coloured fill, broken border).
+        from komyst.ocr import bubble_detector
+
+        detected = bubble_detector.balloon_interior(source_bgr, group.box)
+        if detected is not None:
+            interior = detected
     if not isinstance(interior, np.ndarray) or interior.shape != tuple(image_shape[:2]) or not np.any(interior):
         return None
     ys, xs = np.nonzero(interior)
@@ -18467,7 +18474,7 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     shape_layout = None
     balloon_area = None
     if config.RENDER_FIT_BALLOON_SHAPE and config.AUTO_LINE_WRAP:
-        balloon_area = _balloon_text_area(group, img_bgr.shape)
+        balloon_area = _balloon_text_area(group, img_bgr.shape, source_bgr)
     if balloon_area is not None:
         gx, gy, gw, gh = (int(v) for v in group.box)
         reach_x, reach_y = int(round(0.25 * gw)), int(round(0.25 * gh))

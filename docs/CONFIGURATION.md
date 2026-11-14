@@ -177,6 +177,16 @@ seguindo o formato do balão fechado quando isso permite uma fonte maior, e
 é reta. Também só no código: `CLEAN_SURFACE_FILL` (default `True`) acrescenta o preenchimento
 de degradê suave como candidato da limpeza (ver Documentação Técnica §16).
 
+`BUBBLE_DETECTOR_ENABLED` (default `0`, `.env.example`): liga um detector de balões treinado
+(RT-DETR-v2, ONNX) que define a área de encaixe da tradução em balões coloridos ou de borda
+quebrada, onde o interior branco medido na limpeza falha. Sem detecção que contenha o texto, o
+comportamento é o de sempre. Os pesos **não são empacotados**: baixe `detector.onnx` de
+`ogkalu/comic-text-and-bubble-detector` (Hugging Face, Apache-2.0, SHA-256
+`065744e91c0594ad8663aa8b870ce3fb27222942eded5a3cc388ce23421bd195`) para
+`<dados>\modelsubble\detector.onnx` (ou aponte `BUBBLE_DETECTOR_MODEL`). Modelo ausente
+equivale a desligado. `BUBBLE_DETECTOR_MIN_SCORE` (default `0.35`, só no código) é o corte de
+confiança. Usa DirectML (sob `DIRECTML_LOCK`) com CPU de reserva.
+
 `PIPELINE_PAGE_WORKERS` (só no código, default `auto`): quantas páginas são analisadas,
 pré-renderizadas e renderizadas ao mesmo tempo. `auto` usa um terço dos núcleos lógicos e uma
 página por ~3 GB de memória livre, no máximo 4; valores explícitos de `1` a `4` são aceitos.

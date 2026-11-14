@@ -454,6 +454,12 @@ AUTO_FONT_SHRINK = _env_bool("AUTO_FONT_SHRINK", True)
 # Inside a closed balloon, wrap the translation to the balloon's shape (wide in
 # the middle, narrow at top/bottom) when that lets a larger font fit.
 RENDER_FIT_BALLOON_SHAPE = _env_bool("RENDER_FIT_BALLOON_SHAPE", True)
+# Opt-in speech-balloon detector (RT-DETR-v2 ONNX, weights not bundled): when on, the text-fit
+# area inside a balloon comes from the detected balloon instead of the white interior alone.
+BUBBLE_DETECTOR_ENABLED = _env_bool("BUBBLE_DETECTOR_ENABLED", False)
+BUBBLE_DETECTOR_MODEL = os.getenv("BUBBLE_DETECTOR_MODEL") or os.path.join(
+    str(models_root()), "bubble", "detector.onnx")
+BUBBLE_DETECTOR_MIN_SCORE = _env_float("BUBBLE_DETECTOR_MIN_SCORE", 0.35)
 # Large SFX splash lettering over art skips the four broad render strategies
 # (they fail one by one and the region reaches the LaMA fallback regardless);
 # small SFX and dialogue keep the full cascade.
