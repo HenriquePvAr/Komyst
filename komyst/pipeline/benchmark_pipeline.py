@@ -173,7 +173,7 @@ def _auto_page_workers():
 
 _DELIBERATE_PRESERVE_REASONS = frozenset({
     "source_echo_preserved_original", "sfx_original_lettering_kept", "proper_name_only",
-    "credit", "sound_effect", "sfx_preserved",
+    "credit", "logo", "sound_effect", "sfx_preserved",
 })
 
 
