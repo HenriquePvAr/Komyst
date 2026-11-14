@@ -1908,6 +1908,11 @@ Outras regras de fidelidade da tipografia (2026-11-14):
   `tests/test_raster_font_match.py`.
 - **Censura**: uma sequência de 3 ou mais ideogramas iguais num texto em escrita latina (asteriscos lidos pelo OCR
   como CJK) volta a ser `*` em `clean_ocr_text`. Teste: `tests/test_ocr_censor_glyphs.py`.
+- **Hierarquia por linha** (`_source_line_scale_ratios`): linhas de um balão só ganham tamanhos diferentes quando a
+  tinta difere (spread >= 1,25) **e** as caixas do OCR confirmam (spread >= 1,2). A altura de tinta usa a mediana das
+  linhas com tinta como referência (antes, o pico: numa linha curta como "LET'S" as hastes caíam abaixo de 25 % do pico,
+  a faixa quebrava e 32 px viravam 19 px). Linha sem tinta mensurável anula a hierarquia em vez de recorrer à altura da
+  caixa (que inclui pontuação/asteriscos). Teste: `tests/test_line_scale_hierarchy_noise.py`.
 - **Caixa alta**: a decisão de maiúsculas ignora as letras de mesmo desenho nos dois casos (c, o, s, v, w, x, z, k, p,
   u), que o OCR troca ao acaso. Teste: `tests/test_source_case_ocr_noise.py`.
 

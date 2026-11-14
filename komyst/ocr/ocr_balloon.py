@@ -17847,17 +17847,25 @@ def _line_ink_height(source_bgr, box):
     if mask is None:
         return None
     # The letters' band: the longest run of rows holding at least a quarter of
-    # the densest row. A box also clips a neighbouring line's descenders and a
-    # balloon's spikes, which a plain "any ink" row count includes.
+    # the *typical* inked row. A box also clips a neighbouring line's
+    # descenders and a balloon's spikes, which a plain "any ink" row count
+    # includes. The reference is the median inked row, not the densest one: in
+    # a short all-caps line the bars of T/E/F are so dense that the stem rows
+    # fell just under a quarter of the peak, the run broke at the first stem
+    # row and a 32 px line measured 19 px (drawn as a smaller font).
     profile = mask.sum(axis=1).astype(np.float32)
-    if not profile.size or profile.max() <= 0:
+    inked = profile[profile > 0]
+    if not inked.size:
         return None
-    dense = profile >= 0.25 * profile.max()
+    dense = profile >= 0.25 * float(np.median(inked))
     best = run = 0
     for flag in dense:
         run = run + 1 if flag else 0
         best = max(best, run)
     return float(best) if best else None
+
+
+_LINE_BOX_CORROBORATION = 1.2
 
 
 def _source_line_scale_ratios(group, source_bgr=None):
@@ -17877,8 +17885,20 @@ def _source_line_scale_ratios(group, source_bgr=None):
     heights = [float(line.box[3]) for line in lines]
     if source_bgr is not None and lines:
         inked = [_line_ink_height(source_bgr, line.box) for line in lines]
-        if all(inked):
-            heights = inked
+        if not all(inked):
+            # An unmeasurable line (asterisks, a tiny crop) leaves nothing but
+            # the box, which a punctuation mark or an outline stretches: a
+            # 48 px box over 25 px letters drew the last line of a uniform
+            # balloon larger than the rest.
+            return None
+        # The ink of an outlined/coloured line is measured on a partial glyph
+        # mask and can read 15 vs 21 px on lines drawn at one size. A real
+        # hierarchy also shows in the OCR boxes (same direction, clearly
+        # different heights); equal boxes mean the ink difference is noise.
+        box_spread = max(heights) / max(1e-6, min(heights))
+        if box_spread < _LINE_BOX_CORROBORATION:
+            return None
+        heights = inked
     if len(heights) < 2:
         return None
     median = float(np.median(heights))
