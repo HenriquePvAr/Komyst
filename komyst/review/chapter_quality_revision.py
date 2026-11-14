@@ -3400,6 +3400,14 @@ class ChapterQualityRevision:
                 })
                 continue
             groups = self._groups_from_page_items(page)
+            for group in groups:
+                # Regions inside a changed box were just erased by
+                # ``_clean_previous_translation``: the renderer draws on that clean
+                # background instead of looking for source text that is gone.
+                gx, gy, gw, gh = (int(v) for v in group.box)
+                if any(left <= gx + gw / 2 <= right and top <= gy + gh / 2 <= bottom
+                       for left, top, right, bottom in boxes):
+                    group.pre_cleaned = True
             full, debug_data = render_analyzed_image(
                 cleaned,
                 [],
@@ -3408,6 +3416,8 @@ class ChapterQualityRevision:
                 font_path=config.FONT_PATH or None,
                 page_index=number,
                 image_path=str(image_path),
+                # Style (ink colour, outline) is measured on the original lettering.
+                style_source_bgr=original,
             )
             if full is None or full.shape[:2] != base.shape[:2]:
                 rendered_paths.append(str(current_output))
