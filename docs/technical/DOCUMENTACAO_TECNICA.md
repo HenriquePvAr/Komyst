@@ -1415,6 +1415,12 @@ seção "Mask, boundary and validation fixes"):
   flags de ajuste do Clean, não está no `.env.example`): `_antialias_fringe_mask` acrescenta à
   máscara a franja antialiasada e o contorno de polaridade oposta medidos por alfa, sem
   dilatação global; `_telea_source_without_fringe` impede o Telea de espalhar sobras do anel.
+- **IMPLEMENTADO (2026-11-14)** — fantasma fraco em caixas claras com texto fino: `_line_polarity_level`
+  usa o entorno decisivo também na zona morta 118-138 e quando a tinta arrasta a mediana (limiar de
+  primeiro plano sobre o fundo); `_ring_proven_uniform_solid()` impede que a borda dos glifos
+  reclassifique como "textured_art" um anel medido uniforme nos gates de patch plano/máscara larga;
+  `_uniform_halo_mask()` amplia a máscara pelo halo medido (ruído do fundo, < 0,4x o contraste da
+  tinta). Detalhes e números em `clean_strategy.md`, seção "Faint ghost on light boxes".
 - Polaridade do texto vem da faixa fora da caixa quando a caixa é dominada pela tinta
   (`_line_polarity_level`); o filtro de componentes não descarta mais "!", "?!" nem palavras
   com letras unidas (`_component_is_background_shaped`); a regra de máscara em fundo
