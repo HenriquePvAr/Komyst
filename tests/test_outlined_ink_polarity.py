@@ -59,3 +59,19 @@ def test_the_cleanup_reading_keeps_the_majority_colour():
     profile = ob.extract_original_lettering_profile(image, _group(), BOX)
     assert profile["color_family"] == "white"
 
+
+
+def test_dark_ink_in_a_white_outline_over_textured_art_is_dark():
+    """On textured art both k-means clusters come out white; the enclosed dark core is the ink."""
+    rng = np.random.default_rng(3)
+    y, x = np.arange(200)[:, None], np.arange(460)[None, :]
+    gray = np.clip(174 + np.sin(x / 7.0 + y / 40.0) * 35 + rng.normal(0, 10, (200, 460)), 0, 255)
+    art = np.clip(np.stack([gray * 1.05, gray * 0.85, gray * 0.6], axis=2), 0, 255).astype(np.uint8)
+    image = Image.fromarray(art)
+    draw = ImageDraw.Draw(image)
+    draw.text((30, 50), "ABCDEFGH IJK", font=_font(30), fill=(12, 12, 12), stroke_width=6,
+              stroke_fill=(250, 250, 250))
+    bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    profile = ob.extract_original_lettering_profile(bgr, _group(), BOX, fill_ink=True)
+    assert profile["color_family"] == "black"
+    assert max(profile["dominant_bgr"]) <= 80

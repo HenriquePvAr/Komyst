@@ -20249,6 +20249,24 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
                         dominant_bgr = centers[fill_k]
                     stroke_confidence = round(min(1.0, 0.4 + min(cluster_dist, 200) / 400
                                                   + abs(frac0 - 0.5) * 0.6), 4)
+    if fill_ink and color_family == "white" and bg_gray > 90:
+        # Thin dark ink inside a wide white outline can be too few pixels for its own k-means
+        # cluster (the two clusters both come out white). Dark pixels that are surrounded by the
+        # white footprint are the letter's fill, not shading of the art.
+        dark_core = (glyph_mask & (val <= 70)).astype(np.uint8)
+        dark_count = int(dark_core.sum())
+        if dark_count >= 60 and dark_count >= 0.06 * int(glyph_mask.sum()):
+            ring = (cv2.dilate(dark_core, np.ones((5, 5), np.uint8)) > 0) & ~(dark_core > 0)
+            # The surround must be the outline (clearly lighter than the background), and it must
+            # enclose the dark pixels almost entirely: a dark outline around white ink touches the
+            # page as much as the fill.
+            ring_white = ring & (val >= 185) & (sat <= 75) & (gray >= bg_gray + 20)
+            if int(ring.sum()) and float(ring_white.sum()) / float(ring.sum()) >= 0.75:
+                stroke_color = tuple(int(v) for v in np.median(roi[ring_white], axis=0))
+                dominant_bgr = np.median(roi[dark_core > 0], axis=0)
+                color_family = "black"
+                stroke_present = True
+                stroke_confidence = max(stroke_confidence, 0.6)
     glow_strength = 0
     glow_color = None
     # A glow must reinforce the ink's own already-established dominant color
