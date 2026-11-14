@@ -4377,6 +4377,7 @@ def _group_lines(lines, page_index=None, image_bgr=None):
             part = TextGroup(group_id="", lines=reading_order(column))
             part.text = clean_ocr_text(" ".join(item.text for item in part.lines))
             split.append(part)
+    split = _merge_contained_groups(split)
     for index, group in enumerate(split, start=1):
         group.group_id = f"BALAO_{index}"
     return split
@@ -4870,6 +4871,86 @@ def _boxes_adjacent(a, b, *, gap_factor=1.3):
     )
 
 
+def _merge_contained_groups(groups):
+    """Fold a group whose box lies inside another group's box into that group.
+
+    OCR sometimes reads one big lettering twice (the full word and a fragment of
+    it); the fragment then becomes a second region drawn on top of the first.
+    """
+    merged = []
+    for group in sorted(groups, key=lambda g: -(g.box[2] * g.box[3])):
+        host = next(
+            (other for other in merged
+             if _box_overlap_fraction(group.box, other.box) >= 0.9),
+            None,
+        )
+        if host is None:
+            merged.append(group)
+            continue
+        host.lines = reading_order(host.lines + group.lines)
+        host.text = clean_ocr_text(" ".join(item.text for item in host.lines))
+    kept = {id(group) for group in merged}
+    return [group for group in groups if id(group) in kept]
+
+
+# Measured on page 75 of the reference chapter: letters 210px tall on a 690px page
+# (0.30 of the width, 5x the page's median line), box 21% of the page, two inks
+# (pink and blue) covering ~half the glyph box. Dialogue sits at 0.04-0.06 of the
+# width and is one ink on a fill.
+_LOGO_MIN_LETTER_WIDTH_RATIO = 0.10
+_LOGO_MIN_LETTER_VS_MEDIAN = 2.5
+_LOGO_MIN_AREA_RATIO = 0.08
+_LOGO_MIN_WORDS = 2  # one huge word is a sound effect, handled by the SFX path
+_LOGO_MAX_WORDS = 6
+_LOGO_MIN_INK_RATIO = 0.12
+_LOGO_MIN_HUE_SHARE = 0.15
+
+
+def _graphic_logo_evidence(group, image_bgr, median_line_height):
+    """Measured evidence that a region is a stylised series title/logo, else {}.
+
+    Needs all of: very tall letters (vs page width and vs the page's median line),
+    a large box, few words, and multi-hue saturated ink. Single-ink big text (a
+    shout in a balloon) never passes the hue test.
+    """
+    if image_bgr is None or not group.lines:
+        return {}
+    h_img, w_img = image_bgr.shape[:2]
+    x, y, w, h = group.box
+    words = re.findall(r"[A-Za-z0-9']+", group.text)
+    letter_h = max(line.box[3] for line in group.lines)
+    area_ratio = (w * h) / max(1, w_img * min(h_img, w_img * 2))
+    if not (
+        _LOGO_MIN_WORDS <= len(words) <= _LOGO_MAX_WORDS
+        and not all(_ascii_fold(word).upper() in SFX_WORDS for word in words)
+        and len({word.lower() for word in words}) > 1
+        and letter_h >= w_img * _LOGO_MIN_LETTER_WIDTH_RATIO
+        and letter_h >= median_line_height * _LOGO_MIN_LETTER_VS_MEDIAN
+        and area_ratio >= _LOGO_MIN_AREA_RATIO
+    ):
+        return {}
+    roi = image_bgr[max(0, y):y + h, max(0, x):x + w]
+    if roi.size == 0:
+        return {}
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    inked = (hsv[:, :, 1] >= 70) & (hsv[:, :, 2] >= 120)
+    ink_ratio = float(np.mean(inked))
+    if ink_ratio < _LOGO_MIN_INK_RATIO:
+        return {}
+    bins = np.bincount((hsv[:, :, 0][inked] // 20).astype(int), minlength=9)
+    shares = np.sort(bins / max(1, bins.sum()))[::-1]
+    if shares[1] < _LOGO_MIN_HUE_SHARE:
+        return {}
+    return {
+        "reason": "graphic_title_logo",
+        "letter_width_ratio": round(letter_h / w_img, 3),
+        "letter_vs_median": round(letter_h / max(1.0, median_line_height), 2),
+        "area_ratio": round(area_ratio, 3),
+        "ink_ratio": round(ink_ratio, 3),
+        "second_hue_share": round(float(shares[1]), 3),
+    }
+
+
 def _promote_unknown_story_on_adjacency(groups, page_index=None):
     """Second pass: rescue weak-unknown story text that sits next to real story.
 
@@ -4912,6 +4993,8 @@ def _promote_unknown_story_on_adjacency(groups, page_index=None):
 def _classify_groups(groups, image_bgr, page_index=None):
     h_img, w_img = image_bgr.shape[:2]
     editorial_evidence_by_group = _editorial_graphic_evidence(groups, image_bgr)
+    heights = [line.box[3] for g in groups for line in g.lines]
+    median_line_height = float(np.median(heights)) if heights else 0.0
 
     for group in groups:
         group_started = time.perf_counter()
@@ -5026,7 +5109,17 @@ def _classify_groups(groups, image_bgr, page_index=None):
         )
         editorial_evidence = editorial_evidence_by_group.get(group.group_id)
 
-        if production_credit or editorial_evidence:
+        logo_evidence = (
+            {} if production_credit or editorial_evidence
+            else _graphic_logo_evidence(group, image_bgr, median_line_height)
+        )
+        if logo_evidence:
+            group.inside_balloon_like_region = False
+            group.inside_narration_box_like_region = False
+            _set_group_classification(
+                group, "logo", "graphic_title_logo", confidence=0.9, evidence=logo_evidence,
+            )
+        elif production_credit or editorial_evidence:
             group.inside_balloon_like_region = False
             group.inside_narration_box_like_region = False
             group.classification = "decorative"

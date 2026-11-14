@@ -5159,6 +5159,55 @@ def _dark_narration_image(background):
     return image
 
 
+class GraphicTitleLogoTests(unittest.TestCase):
+    """A stylised multi-colour title is kept as art; big dialogue is still translated."""
+
+    @staticmethod
+    def _page(logo):
+        image = np.full((1335, 690, 3), 250, dtype=np.uint8)
+        if logo:
+            for index, (word, color) in enumerate((("WE ARE", (200, 90, 255)), ("NOT", (255, 170, 60)))):
+                cv2.putText(image, word, (30 + index * 330, 900), cv2.FONT_HERSHEY_DUPLEX, 4.2, color, 28)
+        else:
+            cv2.ellipse(image, (345, 900), (320, 140), 0, 0, 360, (0, 0, 0), 4)
+            cv2.putText(image, "NOT NOW", (60, 930), cv2.FONT_HERSHEY_DUPLEX, 4.2, (0, 0, 0), 12)
+        return image
+
+    def _groups(self, logo):
+        lines = [
+            _boxed_line("SMALL TALK HERE", (200, 160, 180, 40), 0.95),
+            _boxed_line("MORE SMALL TALK", (200, 220, 180, 40), 0.95),
+            _boxed_line("WE ARE NOT", (30, 770, 630, 150), 0.9),
+            _boxed_line("SMALL TALK", (200, 280, 180, 40), 0.95),
+        ]
+        image = self._page(logo)
+        groups = _group_lines(lines, image_bgr=image)
+        return image, groups
+
+    def test_multicolour_title_is_preserved_logo(self):
+        image, groups = self._groups(True)
+        _classify_groups(groups, image)
+        title = next(g for g in groups if "WE ARE" in g.text)
+        self.assertEqual(title.classification, "logo")
+        self.assertTrue(title.ignored)
+        self.assertEqual(title.ignore_reason, "logo")
+
+    def test_large_single_ink_text_stays_translatable(self):
+        image, groups = self._groups(False)
+        _classify_groups(groups, image)
+        big = next(g for g in groups if "WE ARE" in g.text)
+        self.assertNotEqual(big.classification, "logo")
+
+    def test_contained_ocr_fragment_is_merged(self):
+        lines = [
+            _boxed_line("NOT Couple!", (60, 764, 627, 288), 0.9),
+            _boxed_line("We're", (142, 792, 154, 64), 0.95),
+        ]
+        groups = _group_lines(lines, image_bgr=self._page(True))
+        self.assertEqual(len(groups), 1)
+        self.assertIn("We're", groups[0].text)
+
+
 class UniformDarkOpenRegionTests(unittest.TestCase):
     """Cluster 1: narration printed on an open, uniformly dark region.
 

@@ -988,6 +988,13 @@ textuais e de container. Classes: `speech`, `narration`, `sfx`, `decorative` e `
 (evidência insuficiente para decisão segura). SFX são preservados no original por padrão
 (`TRANSLATE_SFX=False`; `True` habilita tradução). A classificação também informa a estratégia de máscara e redraw.
 
+Título/logotipo gráfico (`_graphic_logo_evidence`): grupo de 2–6 palavras (não todas SFX) com letra
+>= 10% da largura da página e >= 2,5x a linha mediana da página, caixa >= 8% da página, tinta
+saturada (S>=70, V>=120) em >= 12% da caixa e um segundo matiz com >= 15% da tinta (fonte monocromática
+não passa). Vira `logo` (ignorado, preservado, sem limpeza nem redesenho; `logo` está em
+`_DELIBERATE_PRESERVE_REASONS`). `_group_lines` funde grupos cujo box está >= 90% dentro de outro
+(fragmento duplicado de OCR).
+
 ### Proveniência e recuperação de OCR
 
 `ocr_line_provenance.py` copia a evidência sempre que uma fronteira é cruzada — o pipeline
