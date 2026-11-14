@@ -788,6 +788,7 @@ def _analyze_image_array(original_bgr, raw_lines, page_index=None):
                 if not getattr(group, "story_display_promoted", False):
                     group.text = raw_text
         _promote_glossary_sounds(groups)
+        _promote_continuation_lettering(groups)
     with profile_step(
         "analyze.score_group_quality",
         page_index=page_index,
@@ -1532,6 +1533,41 @@ _ENGLISH_CONTRACTION_TAILS = frozenset({"S", "T", "LL", "RE", "VE", "D", "M", "E
 _GLUED_HEAD_CONTRACTION_TAILS = frozenset({"S", "LL", "RE", "VE", "D", "M"})
 
 
+def _split_before_hyphen_name(token, run, hyphen_names):
+    """"OPPOSITENA" + "-EUN" -> "OPPOSITE NA" when the glued head is clearly words.
+
+    The cut is the chapter's own hyphenated name when one ends the run ("NA-EUN");
+    without that evidence only a 2-3 letter non-word syllable is cut off, and only
+    when everything before it segments into real words.
+    """
+    key, full = token.upper(), (token + run).upper()
+    cuts = [len(full) - len(name) for name in hyphen_names
+            if full.endswith(name) and len(full) > len(name)]
+    cuts = [c for c in cuts if 2 <= c < len(key)] or [
+        len(key) - n for n in (2, 3) if not region_taxonomy.is_english_word(key[-n:])]
+    for cut in cuts:
+        pieces = region_taxonomy.segment_words(key[:cut]) if cut >= 4 else None
+        if pieces:
+            words, pos = [], 0
+            for piece in pieces:
+                words.append(token[pos:pos + len(piece)])
+                pos += len(piece)
+            return " ".join(words) + " " + token[cut:]
+    return None
+
+
+def chapter_hyphenated_names(texts):
+    """Hyphenated name shapes ("AB-CD") the chapter writes on their own, at least twice."""
+    counts = {}
+    for text in texts or ():
+        for match in re.finditer(r"(?<![A-Za-z-])[A-Za-z]{2,}(?:-[A-Za-z]{2,})+(?![A-Za-z-])", str(text or "")):
+            name = match.group(0).upper()
+            counts[name] = counts.get(name, 0) + 1
+    return frozenset(
+        name for name, n in counts.items()
+        if n >= 2 and not all(region_taxonomy.is_english_word(part) for part in name.split("-")))
+
+
 def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words=frozenset()):
     """``text`` with OCR-damaged tokens repaired before translation.
 
@@ -1548,8 +1584,10 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
     protected_keys = {_name_token_of(name) for name in protected or ()}
     names = sorted({key for key in (_name_token_of(name) for name in chapter_names or ())
                     if len(key) >= 3}, key=len, reverse=True)
+    hyphen_names = sorted({str(n).upper() for n in chapter_names or () if "-" in str(n)},
+                          key=len, reverse=True)
     vocabulary = frozenset(chapter_words or ())
-    hyphen_names = hyphenated_name_tokens(text)
+    hyphen_syllables = hyphenated_name_tokens(text)
 
     def repair(match):
         token = match.group(0)
@@ -1557,6 +1595,11 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
         if (len(key) < 4 or key in protected_keys or key in names or region_taxonomy.is_english_word(key)
                 or region_taxonomy.word_zipf(key) >= 3.0):
             return token
+        run = re.match(r"(?:-[A-Za-z]+)+", match.string[match.end():])
+        if token.isalpha() and run:
+            split = _split_before_hyphen_name(token, run.group(0), hyphen_names)
+            if split:
+                return split
         if token.isalpha():
             for name in names:
                 if key.endswith(name) and len(key) - len(name) >= 2:
@@ -1586,7 +1629,9 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
             if words and len(words) > 1:
                 joined = " ".join(words)
                 return joined if token.upper() == token else joined.lower()
-        corrected = None if key in hyphen_names else _misread_correction(key, vocabulary)
+        # A word right after a hyphenated name is its surname ("NA-EUN GWON").
+        after_name = re.search(r"[A-Za-z]-[A-Za-z]+\s+$", match.string[:match.start()])
+        corrected = None if key in hyphen_syllables or after_name else _misread_correction(key, vocabulary)
         return (_restore_shape(token, corrected) or token) if corrected else token
 
     return re.sub(r"[A-Za-z][A-Za-z'’]*[A-Za-z]|[A-Za-z]", repair, str(text or ""))
@@ -4622,6 +4667,50 @@ def _editorial_graphic_evidence(groups, image_bgr):
             record(first, "aligned_group_cluster", span_ratio, style)
             record(second, "aligned_group_cluster", span_ratio, style)
     return evidence_by_group
+
+
+_DANGLING_FUNCTION_WORDS = frozenset({
+    "AND", "OR", "TO", "OF", "A", "AN", "THE", "BUT", "WITH", "LIKE", "FOR", "IN", "ON", "AT", "BY",
+})
+
+
+def _promote_continuation_lettering(groups):
+    """One plain English word lettered right under a sentence that ends hanging.
+
+    "SOMETHING CLEAR AND" in a narration box continues in a stylized "SIMPLE" below
+    it; the lettering was classified as a sound, kept in English and counted as a
+    residue. A common, non-onomatopoeic word stacked under (or beside) a sentence
+    that ends on a function word, with substantial horizontal overlap and a gap of
+    about a text line, is the rest of that sentence: promote it to the same role so
+    it is translated and cleaned. Real sounds (glossary hit, rare word) stay.
+    """
+    from komyst.translation.sfx_glossary import translate_sfx_fuzzy
+
+    for sfx in groups:
+        if sfx.classification != "sfx":
+            continue
+        words = re.findall(r"[A-Za-z]+", str(sfx.text or ""))
+        if (len(words) != 1 or len(words[0]) < 4 or translate_sfx_fuzzy(sfx.text)
+                or region_taxonomy.word_zipf(words[0].upper()) < 4.0):
+            continue
+        sx, sy, sw, sh = sfx.box
+        for head in groups:
+            if head is sfx or head.ignored or head.classification not in {"speech", "narration"}:
+                continue
+            head_words = re.findall(r"[A-Za-z]+", str(head.text or ""))
+            if not head_words or head_words[-1].upper() not in _DANGLING_FUNCTION_WORDS:
+                continue
+            hx, hy, hw, hh = head.box
+            line_h = hh / max(1, len(head.lines))
+            overlap = min(hx + hw, sx + sw) - max(hx, sx)
+            gap = sy - (hy + hh)
+            if overlap >= 0.4 * min(hw, sw) and -0.5 * line_h <= gap <= 1.5 * line_h:
+                _set_group_classification(
+                    sfx, head.classification, "continuation_of_hanging_sentence", confidence=0.8,
+                    evidence={"previous_classification": "sfx", "continues_group": head.group_id})
+                sfx.ignored, sfx.ignore_reason = False, ""
+                sfx.story_display_promoted = True
+                break
 
 
 def _promote_glossary_sounds(groups):
