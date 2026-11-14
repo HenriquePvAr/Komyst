@@ -5717,3 +5717,41 @@ class RenderedRescueAndSfxCoverageTests(unittest.TestCase):
             state="skipped_with_reason")
         items = [self._rendered("R1", (140, 534, 430, 44)), sfx]
         self.assertEqual(_incomplete_speech_region_coverage(self._state(items)), [])
+
+
+def _stack_group(group_id, text, classification, box, lines=1, ignored=False):
+    import numpy as np
+    from komyst.ocr.ocr_balloon import TextGroup
+    from komyst.ocr.ocr_engine import OCRLine
+    x, y, w, h = box
+    row = h // lines
+    ocr_lines = [OCRLine(text=text, confidence=0.97,
+                         polygon=np.array([[x, y + i * row], [x + w, y + i * row], [x + w, y + (i + 1) * row],
+                                           [x, y + (i + 1) * row]], dtype=np.int32),
+                         box=(x, y + i * row, w, row), raw_text=text, engine="rapidocr", page=1)
+                 for i in range(lines)]
+    return TextGroup(group_id=group_id, lines=ocr_lines, text=text, classification=classification,
+                     ignored=ignored, ignore_reason="sfx_translation_disabled" if ignored else "")
+
+
+def test_plain_word_under_hanging_sentence_joins_it():
+    from komyst.ocr.ocr_balloon import _promote_continuation_lettering
+    head = _stack_group("H", "SOMETHING CLEAR AND", "narration", (200, 100, 280, 70), lines=2)
+    tail = _stack_group("T", "SIMPLE", "sfx", (230, 185, 250, 110), ignored=True)
+    _promote_continuation_lettering([head, tail])
+    assert tail.classification == "narration" and not tail.ignored
+    from komyst.ocr.ocr_balloon import get_translatable_groups
+    assert tail in get_translatable_groups([head, tail])
+
+
+def test_continuation_promotion_keeps_real_sounds_and_closed_sentences():
+    from komyst.ocr.ocr_balloon import _promote_continuation_lettering
+    head = _stack_group("H", "SOMETHING CLEAR AND", "narration", (200, 100, 280, 70), lines=2)
+    sound = _stack_group("S", "WHOOSH", "sfx", (230, 185, 250, 110), ignored=True)
+    far = _stack_group("F", "SIMPLE", "sfx", (230, 600, 250, 110), ignored=True)
+    done = _stack_group("D", "ALL CLEAR.", "narration", (200, 100, 280, 70), lines=2)
+    below = _stack_group("B", "SIMPLE", "sfx", (230, 185, 250, 110), ignored=True)
+    _promote_continuation_lettering([head, sound, far])
+    assert sound.classification == far.classification == "sfx"
+    _promote_continuation_lettering([done, below])
+    assert below.classification == "sfx"

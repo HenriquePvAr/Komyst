@@ -1712,6 +1712,15 @@ Décima primeira passada (reconstrução e regiões restantes, 2026-10-25, **IMP
   DeepL o recebe em `<x>` com `tag_handling=xml` e `ignore_tags=["x"]`
   (`komyst/translation/honorific_names.py`), e só os lotes com um nome assim mudam de formato.
   ep33, 33 páginas: 106 → 108 traduzidos, mesmas falhas visuais.
+- Nomes com hífen e letreiro de continuação: `split_glued_source_words` separa o prefixo colado de
+  um nome com hífen ("OPPOSITENA-EUN" → OPPOSITE NA-EUN; só quando o prefixo se segmenta em
+  palavras reais, com o nome do capítulo de `chapter_hyphenated_names` — forma `AB-CD` escrita
+  isolada ao menos 2 vezes — ou uma sílaba de 2-3 letras que não é palavra) e não "corrige" o
+  sobrenome que vem depois de um nome com hífen ("NA-EUN GWON"). `_promote_continuation_lettering`
+  (após `_promote_glossary_sounds`) promove um sfx de uma palavra comum (Zipf ≥ 4, fora do
+  glossário de sons) empilhado sob uma fala/narração que termina em palavra funcional ("AND",
+  "TO", "THE"...), com sobreposição horizontal ≥ 40% e vão ≤ 1,5 linha, ao papel dessa frase:
+  traduzido e limpo em vez de ficar como resíduo em inglês (grupos continuam separados).
 - Tradução (passo 13): `split_glued_source_words` passou a reparar também um nome do capítulo
   grudado no fim de um token ("GWANG-ILJEON" → GWANG-IL JEON, `chapter_names`) e uma letra lida
   errado (`_misread_correction`: "HIPES" → HIDES quando o capítulo escreve HIDES em outro balão,

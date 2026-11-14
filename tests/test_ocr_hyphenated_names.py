@@ -29,3 +29,25 @@ def test_hyphenated_name_not_penalized():
     _, reasons = _score("TOAN-KI'S MANAGER")
     assert "unknown_short_token_in_phrase" not in reasons
     assert "dictionary_near_miss" not in reasons
+
+
+def test_glued_prefix_is_split_off_a_hyphenated_name():
+    assert split_glued_source_words("OPPOSITEXY-ZED QUO") == "OPPOSITE XY-ZED QUO"
+    assert split_glued_source_words("KINDOFTALKABOUTXY-ZED.") == "KIND OF TALK ABOUT XY-ZED."
+    assert split_glued_source_words("BADMOUTHEDXY-ZED") == "BADMOUTHED XY-ZED"
+
+
+def test_chapter_hyphenated_name_drives_the_cut():
+    from komyst.ocr.ocr_balloon import chapter_hyphenated_names
+    names = chapter_hyphenated_names(["XY-ZED HEARD.", "NO, XY-ZED!", "WELL-KNOWN WELL-KNOWN"])
+    assert names == {"XY-ZED"}
+    assert split_glued_source_words("OPPOSITEXY-ZED", chapter_names=names) == "OPPOSITE XY-ZED"
+
+
+def test_surname_after_hyphenated_name_is_not_misread_corrected():
+    assert split_glued_source_words("XY-ZED GWON", chapter_words=frozenset({"WON"})) == "XY-ZED GWON"
+
+
+def test_real_hyphenated_compounds_are_untouched():
+    for text in ("WELL-KNOWN", "SOMETHING-ELSE", "MOTHER-IN-LAW"):
+        assert split_glued_source_words(text) == text

@@ -67,6 +67,7 @@ from komyst.ocr.ocr_balloon import (
     release_group_buffers,
     propagate_chapter_declared_names,
     split_glued_source_words,
+    chapter_hyphenated_names,
     chapter_source_words,
     recover_protected_term_boundaries,
     summarize_speech_container_reocr,
@@ -3841,12 +3842,14 @@ def run_benchmark(args):
         # and one misread letter the chapter itself attests ("HIPES" -> HIDES).
         # The first pass and every retry then see the same source.
         chapter_words = chapter_source_words(group.text for group in translation_targets)
+        glue_names = [*detected_names, *chapter_hyphenated_names(
+            group.text for group in all_analyzed_groups)]
         for i in remote_index:
             group = translation_targets[i]
             source = str(getattr(group, "canonical_source_text", "") or group.text)
             split = split_glued_source_words(
                 source, protected=getattr(group, "detected_proper_names", ()),
-                chapter_names=detected_names, chapter_words=chapter_words)
+                chapter_names=glue_names, chapter_words=chapter_words)
             if split != source:
                 group.canonical_source_text = split
         remote = translator.translate_many(
