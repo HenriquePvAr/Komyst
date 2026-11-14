@@ -3338,8 +3338,10 @@ def _render_analyzed_image(
                     ),
                 })
                 complex_background = (
-                    str(mask_metrics.get("background_type") or group.background_type).lower()
-                    in {"textured_art", "speed_lines", "sfx_area", "unknown"}
+                    (str(mask_metrics.get("background_type") or group.background_type).lower()
+                     in {"textured_art", "speed_lines", "sfx_area", "unknown"}
+                     and not (str(group.background_type).lower() == "textured_art"
+                              and _ring_proven_uniform_solid(getattr(group, "background_metrics", {}))))
                     or str((getattr(group, "background_metrics", {}) or {}).get(
                         "local_background_class", ""
                     )).lower() in {"gradient", "structured_or_textured"}
@@ -13069,6 +13071,53 @@ def _antialias_fringe_mask(original_bgr, cleanup_mask, group):
     return fringe.astype(np.uint8) * 255, metrics
 
 
+def _uniform_halo_mask(original_bgr, cleanup_mask, group):
+    """Faint halo around lettering on a ring measured as one solid tone, measured not dilated.
+
+    Anti-alias and compression ringing fade out a few pixels beyond the glyph mask. On a
+    plain box the flat fill reproduces the tone, so any pixel near the mask that still
+    departs from the measured tone by more than the box's own noise (and by clearly less
+    than the ink does) is lettering residue and joins the mask. Stronger pixels (the box
+    border, art) and anything beyond the reach stay untouched.
+    """
+    mask_all = np.asarray(cleanup_mask) > 0
+    empty = np.zeros(mask_all.shape, dtype=np.uint8)
+    metrics = {"uniform_halo_pixels": 0}
+    background_metrics = getattr(group, "background_metrics", None) or {}
+    if (original_bgr is None or not np.any(mask_all) or original_bgr.shape[:2] != mask_all.shape
+            or not _ring_proven_uniform_solid(background_metrics)):
+        return empty, metrics
+    tone = np.asarray(background_metrics.get("local_background_median_bgr") or [], dtype=np.float32)
+    lines = _cleanup_lines_for_group(group)
+    if tone.shape != (3,) or not lines:
+        return empty, metrics
+    reach = max(3, min(8, int(round(0.4 * float(np.median([int(l.box[3]) for l in lines]))))))
+    height, width = mask_all.shape
+    x, y, w, h = [int(v) for v in group.box]
+    pad = reach + 4
+    x1, y1, x2, y2 = max(0, x - pad), max(0, y - pad), min(width, x + w + pad), min(height, y + h + pad)
+    diff = np.abs(original_bgr[y1:y2, x1:x2].astype(np.float32) - tone).max(axis=2)
+    local = mask_all[y1:y2, x1:x2]
+    distance = cv2.distanceTransform((~local).astype(np.uint8), cv2.DIST_L2, 3)
+    ink = float(np.percentile(diff[local], 95))
+    band = (distance > reach + 1) & (distance <= reach + 4) & (diff < 0.4 * ink)
+    if np.count_nonzero(band) < 30:
+        return empty, metrics
+    floor = max(3.0, float(np.percentile(diff[band], 99)) + 1.0)
+    candidate = (~local) & (distance <= reach) & (diff > floor) & (diff < 0.4 * ink)
+    kernel = np.ones((3, 3), np.uint8)
+    grown = local.copy()
+    for _ in range(reach):
+        grown |= (cv2.dilate(grown.astype(np.uint8), kernel) > 0) & candidate
+    added = grown & ~local
+    if np.count_nonzero(added) > np.count_nonzero(local):
+        return empty, metrics
+    out = empty.copy()
+    out[y1:y2, x1:x2] = added.astype(np.uint8) * 255
+    metrics["uniform_halo_pixels"] = int(np.count_nonzero(added))
+    return out, metrics
+
+
 def in_mask_residual_metrics(original_bgr, cleaned_bgr, cleanup_mask):
     """Diagnostic (shadow-mode) measure of lettering that survives *inside* the mask.
 
@@ -14731,6 +14780,10 @@ def _remove_text_for_group(
                 + fringe_metrics["antialias_fringe_pixels"]
             )
         component_metrics.update(fringe_metrics)
+        halo_mask, halo_metrics = _uniform_halo_mask(original_bgr, cleanup_mask, group)
+        if np.any(halo_mask):
+            cleanup_mask = cv2.bitwise_or(cleanup_mask, halo_mask)
+        component_metrics.update(halo_metrics)
         cleanup_mask, hole_pixels = _fill_enclosed_glyph_holes(cleanup_mask, group)
         component_metrics["enclosed_glyph_hole_pixels"] = hole_pixels
         if hole_pixels:
@@ -15537,6 +15590,18 @@ def _textured_fill_shift_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
             "textured_fill_shift_rejected": bool(abs(shift) > limit)}
 
 
+def _ring_proven_uniform_solid(background_metrics) -> bool:
+    """The tiles around the lettering were measured as one solid tone.
+
+    The region-wide ``background_type`` ("textured_art") also counts the glyph edges inside
+    the draw box, so a light box with thin lettering reads as textured; the ring evidence
+    is what says whether a flat fill can be wrong there.
+    """
+    metrics = background_metrics or {}
+    return (metrics.get("local_background_spatial_class") == "PROVEN_UNIFORM"
+            and metrics.get("local_background_class") in {"solid_light", "solid_dark"})
+
+
 def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask):
     """Reject a reconstruction that replaced artwork with a synthetic flat block.
 
@@ -15570,6 +15635,11 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
     flatness = _local_background_flatness(original_bgr, cleanup_mask)
     if flatness["flat_fill_supported"]:
         return {**empty, **flatness}
+    if _ring_proven_uniform_solid(background_metrics):
+        # The tiles around the text were measured as one tone. The ring used above also
+        # holds the neighbouring text line and the box border, which read as texture and
+        # made a flat fill look like a synthetic patch (the line then survived as a ghost).
+        return {**empty, **flatness, "flat_fill_supported": True, "flat_fill_proven_uniform": True}
     mask = np.asarray(cleanup_mask) > 0
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8),
@@ -16032,7 +16102,14 @@ def _line_polarity_level(gray, line, median):
     """
 
     ring = _local_line_background_level(gray, line, median)
-    if (median <= 118 and ring >= 138) or (median >= 138 and ring <= 118):
+    # A median in the 118-138 dead zone is what dense dark ink on a light box produces
+    # (ink and background nearly balance); a decisive surround settles the polarity too.
+    if (median < 138 and ring >= 138) or (median > 118 and ring <= 118):
+        return ring
+    if (ring >= 138 and median >= 138 and ring - median > 20) or (
+            ring <= 118 and median <= 118 and median - ring > 20):
+        # Same side, but the ink drags the box median well off the surround: the
+        # threshold must sit on the background, or low-contrast lettering falls under it.
         return ring
     if 118 < ring < 138:
         # Mid-tone surround: the box median says nothing (white text pulls it up,
@@ -20096,6 +20173,8 @@ def _enforce_visual_bounds(
         and metrics.get("strategy") != "source_scoped"
         and metrics.get("background_type")
         not in {"white_balloon", "dark_balloon", "narration_box"}
+        # a ring measured as one solid tone is a plain box whatever the draw box's edges say
+        and not _ring_proven_uniform_solid(getattr(group, "background_metrics", None))
         and not _broad_mask_reconstructed(group, metrics)
     ):
         reasons.append("broad_rectangular_or_polygonal_mask")
