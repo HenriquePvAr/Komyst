@@ -1516,6 +1516,12 @@ Quinta passada (escolha da reconstrução e fantasmas, **IMPLEMENTADO**; detalhe
   letras como fantasma. O resultado do LaMa recebe ainda um deslocamento de tom por canal
   (mediana logo fora da máscara menos mediana logo dentro; o modelo devolve a área ~3–5 níveis
   mais escura), registrado em `learned_texture_fill.tone_offset_bgr`.
+- `CLEAN_LEARNED_HALO_MASK` (padrão `True`, IMPLEMENTADO): antes do LaMa, `_measured_halo_mask`
+  amplia a máscara sobre o halo/contorno do texto medido nos pixels (cor 2–4 px fora da máscara,
+  até 8 px, só o que está conectado; 4 px quando a cor nunca termina, ou seja, é o fundo). Uma
+  máscara que parava dentro do halo fazia o modelo ler o halo como contexto e repintá-lo como
+  contorno cinza fantasma. Dentro da máscara ampliada o resultado continua restrito; a extensão
+  é registrada em `authorized_fill_extension`.
 - `_fill_enclosed_glyph_holes`: buraco totalmente cercado pela máscara do texto (≤ altura da
   linha²) entra na máscara — miolo preto de letra com contorno branco ou contraforma.
 - `_group_stroke_band` mede o contorno pelo espaço até o extremo da faixa de tons (não mais

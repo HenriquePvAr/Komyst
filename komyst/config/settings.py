@@ -544,6 +544,8 @@ CLEAN_SPLIT_MERGED_GLYPHS = _env_bool("CLEAN_SPLIT_MERGED_GLYPHS", True)
 # On textured backgrounds reconstruct with the verified local LaMa model (the
 # ADVANCED_ART_INPAINT_* asset) instead of Telea, which leaves smooth patches.
 CLEAN_LEARNED_TEXTURE_FILL = _env_bool("CLEAN_LEARNED_TEXTURE_FILL", True)
+# Grow the learned fill's mask over the measured lettering halo/outline.
+CLEAN_LEARNED_HALO_MASK = _env_bool("CLEAN_LEARNED_HALO_MASK", True)
 # A pixel residual refusal is confirmed by re-reading the cleaned crop with the OCR;
 # it is lifted only when none of the group's source words is legible any more.
 CLEAN_RESIDUAL_OCR_CHECK = _env_bool("CLEAN_RESIDUAL_OCR_CHECK", True)
