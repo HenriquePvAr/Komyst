@@ -17543,6 +17543,39 @@ def _flatten_dark_backdrop_residue(result, original_bgr, fill_mask, profile):
     return result
 
 
+def _measured_halo_mask(source_bgr, mask_u8, max_px=8, tol=30):
+    """``mask_u8`` plus the lettering's halo/outline measured from the pixels, or ``mask_u8``.
+
+    The outline colour is read 2-4 px outside the mask (past the anti-aliased fringe);
+    pixels within ``max_px`` that keep that colour and chain to the mask are the halo.
+    A model given a mask that stops inside the halo reads the halo as context and
+    repaints it as a grey ghost outline on textured art (measured on synthetic text
+    over real art: the single biggest error source). Growth is capped at ``max_px`` and
+    cut to 4 px when the colour never ends (it is the backdrop, not a halo).
+    """
+    inside = mask_u8 > 0
+    dist = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 3)
+    sample = (dist > 2) & (dist <= 4)
+    if np.count_nonzero(sample) < 20:
+        return mask_u8
+    src = source_bgr.astype(np.int16)
+    colour = np.median(src[sample], axis=0)
+    seed = dist <= 2
+    close = (dist <= max_px) & (np.abs(src - colour).max(axis=2) <= tol)
+    _count, labels = cv2.connectedComponents((close | seed).astype(np.uint8), connectivity=8)
+    touching = np.unique(labels[seed])
+    halo = (close | seed) & np.isin(labels, touching[touching > 0])
+    # A halo is a band that ends: if it still fills the outer rim, that colour is the
+    # backdrop itself, so only a short reach is safe.
+    cap = (dist > max_px - 1.5) & (dist <= max_px)
+    if max_px > 4 and np.count_nonzero(cap) and float(np.mean(halo[cap])) > 0.3:
+        return _measured_halo_mask(source_bgr, mask_u8, max_px=4, tol=tol)
+    grown = cv2.morphologyEx(halo.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    grown = cv2.dilate(grown, np.ones((3, 3), np.uint8))  # the blurred outer edge
+    grown[dist > max_px + 1] = 0
+    return np.maximum(grown, mask_u8)
+
+
 def _learned_inpaint(current_bgr, group, cleanup_mask):
     """The verified local model's reconstruction of ``cleanup_mask``, or ``None``.
 
@@ -17550,6 +17583,16 @@ def _learned_inpaint(current_bgr, group, cleanup_mask):
     tone correction and cache; an unavailable model is recorded on the group.
     """
     mask_u8 = _grown_fill_mask(group, cleanup_mask)
+    if config.CLEAN_LEARNED_HALO_MASK:
+        halo_mask = _measured_halo_mask(current_bgr, mask_u8)
+        protect = getattr(group, "structure_protect_mask", None)
+        if isinstance(protect, np.ndarray) and protect.shape == halo_mask.shape:
+            halo_mask[(protect > 0) & (mask_u8 == 0)] = 0
+        enclosure = getattr(group, "light_enclosure_interior", None)
+        if isinstance(enclosure, np.ndarray) and enclosure.shape == halo_mask.shape:
+            halo_mask[~enclosure.astype(bool) & (mask_u8 == 0)] = 0
+        _record_fill_extension(group, halo_mask, mask_u8)
+        mask_u8 = halo_mask
     ys, xs = np.nonzero(mask_u8)
     pad = 32
     y1, y2 = max(0, ys.min() - pad), min(mask_u8.shape[0], ys.max() + pad + 1)

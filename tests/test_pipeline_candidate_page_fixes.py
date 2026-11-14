@@ -137,8 +137,9 @@ def test_textured_region_is_reconstructed_by_the_learned_model(monkeypatch):
     # The model's flat fill, shifted by the measured tone offset: one colour inside.
     filled = tuple(out[30, 60])
     assert len({tuple(v) for v in out[25:35, 40:80].reshape(-1, 3)}) == 1
-    # The model works on the mask grown by 2 px (ghost-letter margin); nothing beyond.
-    grown = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    # The model works on the mask grown by 2 px (ghost-letter margin) plus the measured
+    # halo (at most 9 px in all); nothing beyond.
+    grown = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19)))
     assert np.array_equal(out[grown == 0], image[grown == 0])
     assert tuple(out[19, 60]) == filled
     assert group.learned_texture_fill["status"] == "applied"
