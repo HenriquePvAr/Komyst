@@ -813,7 +813,10 @@ def source_line_masks(image_bgr: np.ndarray, lines, ink_bgr=None) -> list[tuple[
             continue
         if ink_bgr is not None:
             distance = np.max(np.abs(crop.astype(np.int16) - np.array(ink_bgr, np.int16)), axis=2)
-            ink = distance < 70
+            # Same coverage cut as the candidates' rasters (~40 % ink): a fixed distance kept only
+            # the solid core of the source strokes, so thin faces matched bold lettering.
+            background = float(np.percentile(distance, 90))
+            ink = distance < max(40.0, 0.6 * background)
         else:
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
             _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)

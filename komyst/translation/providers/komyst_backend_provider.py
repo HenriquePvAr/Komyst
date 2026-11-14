@@ -710,6 +710,16 @@ class KomystBackendTranslationProvider:
             return response
 
     def translate_many(self, texts, *, force: bool = False):
+        """Translate keeping the source's censored words censored (see ``censor_tokens``)."""
+        from komyst.translation import censor_tokens
+
+        protected = [censor_tokens.protect(text) for text in list(texts or [])]
+        if not any(tokens for _text, tokens in protected):
+            return self._translate_many_unprotected(texts, force=force)
+        results = self._translate_many_unprotected([text for text, _tokens in protected], force=force)
+        return [censor_tokens.restore(result, tokens) for result, (_text, tokens) in zip(results, protected)]
+
+    def _translate_many_unprotected(self, texts, *, force: bool = False):
         """Pipeline adapter preserving positional item identity and one request id.
 
         The worker supplies a stable job id through the process environment.  No
