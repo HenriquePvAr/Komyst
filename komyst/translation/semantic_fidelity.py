@@ -959,10 +959,24 @@ _THIRD_PERSON_NOUN_WITH_FIRST_PERSON_STEP = re.compile(
 )
 
 
+# The personal infinitive takes a subject after these heads, so "é melhor você
+# ficar", "para você ver", "antes de eles irem" are standard Portuguese.
+_PERSONAL_INFINITIVE_HEAD = re.compile(
+    r"\b(?:para|pra|de|sem|ate|apos|e melhor|e bom|e hora de|melhor)\s+$"
+)
+
+
+def _bare_infinitive(folded):
+    for match in _BARE_INFINITIVE.finditer(folded):
+        if not _PERSONAL_INFINITIVE_HEAD.search(folded[:match.start()]):
+            return match
+    return None
+
+
 def _malformed_portuguese(candidate):
     folded = _fold(candidate)
     match = (
-        _BARE_INFINITIVE.search(folded)
+        _bare_infinitive(folded)
         or _DUPLICATED_FUNCTION_WORD.search(folded)
         or _THIRD_PERSON_NOUN_WITH_FIRST_PERSON_STEP.search(folded)
     )

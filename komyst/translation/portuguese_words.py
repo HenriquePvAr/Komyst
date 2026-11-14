@@ -54,11 +54,24 @@ def unknown_target_words(translation: str, source: str = "") -> list[str]:
         key = unicodedata.normalize("NFC", word.upper())
         folded = _fold(key)
         if (len(key) < MIN_WORD_LENGTH or key in vocabulary or folded in vocabulary or folded in source_words
-                or folded in source_letters or is_english_word(folded)):
+                or folded in source_letters or is_english_word(folded)
+                or _diminutive_of_known_word(folded, vocabulary)):
             continue
         if key not in unknown:
             unknown.append(key)
     return unknown
+
+
+_DIMINUTIVE = re.compile(r"^(?P<stem>[A-Z]{3,}?)Z?(?:INH|IT)(?P<gender>[OA])S?$")
+
+
+def _diminutive_of_known_word(folded: str, vocabulary) -> bool:
+    """A regular diminutive of a known word: INSETOZINHO, CASINHA, GATINHOS, MOCITA."""
+    match = _DIMINUTIVE.match(folded)
+    if not match:
+        return False
+    stem, gender = match.group("stem"), match.group("gender")
+    return any(form in vocabulary for form in (stem, stem + gender, stem + "O", stem + "A", stem + "E"))
 
 
 MIN_RESTORE_SIMILARITY = 0.55
@@ -74,8 +87,14 @@ def restore_corrupted_source_words(translation: str, source: str, unknown: list[
     import difflib
 
     present = {_fold(w) for w in _WORD.findall(str(translation or ""))}
+    from komyst.review.region_taxonomy import word_zipf
+
+    # Only a name or coinage can be "mangled back": an ordinary English word the
+    # provider rendered as an unfamiliar Portuguese form (INSECT -> INSETOZINHO,
+    # DISTRACTED -> DISTRATADO) was translated, and restoring it puts English back.
     candidates = [w for w in _WORD.findall(str(source or ""))
-                  if len(w) >= MIN_WORD_LENGTH and _fold(w) not in present]
+                  if len(w) >= MIN_WORD_LENGTH and _fold(w) not in present
+                  and word_zipf(_fold(w)) < 3.0]
     repaired = str(translation or "")
     for bad in unknown:
         best, best_ratio = "", MIN_RESTORE_SIMILARITY

@@ -3299,6 +3299,9 @@ def _render_analyzed_image(
                     if cleanup_mask is not None and np.any(cleanup_mask)
                     else np.zeros(original.shape[:2], dtype=bool)
                 )
+                # The ring a fill recorded as authorized (measured halo) is part of
+                # the effective fill area, not a leak out of it.
+                fill_mask = fill_mask | _authorized_fill_extension(group, fill_mask.shape)
                 fill_mask_pixels = int(np.count_nonzero(fill_mask))
                 text_pixels = max(1, int(mask_metrics.get("text_component_pixels", 0) or 0))
                 changed_base = _inpaint_change_metrics(before_group, cleaned, cleanup_mask)
@@ -6686,7 +6689,9 @@ def ocr_suspicious_but_translatable(group):
         return False
     if _has_embedded_digit_corruption(text):
         return False
-    if len(_ordinary_dialogue_words(text)) >= 2:
+    # Glued words ("GETTINGINTO", "SOMESTRANGE") are counted as the words they
+    # are; the translator receives the same split text (split_glued_source_words).
+    if len(_ordinary_dialogue_words(split_glued_source_words(text))) >= 2:
         return True
     if (
         reasons == {"improbable_apostrophe_pattern"}
@@ -7579,9 +7584,13 @@ def apply_rapidocr_region_recovery(
         # and the alternative is not lower quality.  This deliberately does
         # not select or rewrite the recovery; the existing P32 source-trust
         # gate will route it to review on the next gate pass.
+        # Reads that differ only where one glued two words ("YOUMAKE" / "YOU MAKE")
+        # agree once both are split the same way; that is not a source dispute.
         materially_variant = (
             pair_attempts[0]["word_signature"]
             != pair_attempts[1]["word_signature"]
+            and _source_recovery_word_signature(split_glued_source_words(primary_raw))
+            != _source_recovery_word_signature(split_glued_source_words(recovery_raw))
         )
         credible_alternative = float(candidate.quality_score) >= float(group.quality_score)
         # The crop reaches past the region; a re-read with clearly more letters
@@ -19364,12 +19373,23 @@ def _render_translation_label(page_bgr, original_bgr, group, font_path, occupied
     return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR), allowed, label, mode
 
 
+def _authorized_fill_extension(group, shape):
+    """The halo ring a fill recorded via ``_record_fill_extension`` (or all False)."""
+    extension = getattr(group, "authorized_fill_extension", None)
+    if isinstance(extension, np.ndarray) and extension.shape == tuple(shape[:2]):
+        return extension.astype(bool)
+    return np.zeros(tuple(shape[:2]), dtype=bool)
+
+
 def _draw_allowed_group_mask(image_shape, group, cleanup_mask=None):
     mask = (
         cleanup_mask.copy()
         if cleanup_mask is not None
         else _build_text_mask(image_shape, [group], padding=0)
     )
+    # Pixels the fill was authorized to rebuild beyond the text mask may differ
+    # from the original; without them the page guard rolls back a correct page.
+    mask[_authorized_fill_extension(group, mask.shape)] = 255
     if group.translation_box:
         x, y, w, h = group.translation_box
         profile = getattr(group, "typography_profile", {}) or {}
