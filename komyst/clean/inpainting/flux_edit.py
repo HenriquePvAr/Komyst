@@ -203,10 +203,11 @@ def _run_reference_edit(source, directory, prompt, steps, timeout_seconds, metri
             "--steps", str(int(steps)),
             "-W", str(int(padded.shape[1])),
             "-H", str(int(padded.shape[0])),
-            "--offload-to-cpu",
             "--vae-tiling",
             "-s", "42",
         ]
+        if settings.FLUX_OFFLOAD_TO_CPU:
+            command.append("--offload-to-cpu")
         try:
             with (tmp_path / "stderr.log").open("wb") as error_log:
                 result = subprocess.run(

@@ -15980,15 +15980,24 @@ def _dark_blotch_artifact_metrics(
     lettering_colored = original_gray >= ink - 0.25 * max(0.0, ink - 45.0)
     outside = np.asarray(cleanup_mask) == 0
     islands = np.zeros(new_dark.shape, dtype=bool)
+    page_height, page_width = new_dark.shape
     for label in range(1, count):
-        component = labels == label
+        # Work inside the component's box padded past the widest dilation (25x25):
+        # identical result, without whole-page passes per component.
+        left, top, box_width, box_height = (int(v) for v in stats[label, :4])
+        y0, y1 = max(0, top - 13), min(page_height, top + box_height + 13)
+        x0, x1 = max(0, left - 13), min(page_width, left + box_width + 13)
+        window = (slice(y0, y1), slice(x0, x1))
+        component = labels[window] == label
+        gray_window = original_gray[window]
+        outside_window = outside[window]
         touch = cv2.dilate(component.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
-        continues_dark_art = (np.any(touch & dark_context)
-                              and np.mean(lettering_colored[component]) >= 0.8)
+        continues_dark_art = (np.any(touch & dark_context[window])
+                              and np.mean(lettering_colored[window][component]) >= 0.8)
         # Light lettering on a dark (not black) backdrop: the fill matches the
         # backdrop right outside the mask, so it is that backdrop restored.
-        around = (cv2.dilate(component.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0) & outside
-        backdrop = original_gray[around].astype(np.float32) if np.count_nonzero(around) >= 30 else None
+        around = (cv2.dilate(component.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0) & outside_window
+        backdrop = gray_window[around].astype(np.float32) if np.count_nonzero(around) >= 30 else None
         restores_backdrop = bool(
             backdrop is not None
             # The tone match on a plain (low-spread) backdrop is the evidence; the
@@ -15997,12 +16006,12 @@ def _dark_blotch_artifact_metrics(
             and float(np.median(np.abs(backdrop - np.median(backdrop)))) <= 12.0
             # Light art that continues out of the mask (a line under the text)
             # was erased, not lettering removed.
-            and not np.any(touch & outside & (original_gray >= 90))
-            and np.mean(lettering_colored[component]) >= 0.5
-            and abs(float(np.mean(cleaned_gray[component])) - float(np.median(backdrop))) <= 25
+            and not np.any(touch & outside_window & (gray_window >= 90))
+            and np.mean(lettering_colored[window][component]) >= 0.5
+            and abs(float(np.mean(cleaned_gray[window][component])) - float(np.median(backdrop))) <= 25
         )
         if not continues_dark_art and not restores_backdrop:
-            islands |= component
+            islands[window] |= component
     new_dark = islands
     count, _, stats, _ = cv2.connectedComponentsWithStats(new_dark.astype(np.uint8), 8)
     largest = max(

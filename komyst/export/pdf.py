@@ -305,7 +305,7 @@ def prepare_smart_webtoon_pages(
             page_path = folder / f"page_{len(page_paths) + 1:03}.png"
             # Plain lossless PNG: Pillow's optimizer costs a multiple of the encode
             # time for ~1% fewer bytes, and the decoded pixels are identical.
-            page.save(page_path, "PNG")
+            page.save(page_path, "PNG", compress_level=1)
             page.close()
             page_paths.append(str(page_path))
             split_records.append(
@@ -320,7 +320,7 @@ def prepare_smart_webtoon_pages(
 
     if buffer is not None and buffer.height:
         page_path = folder / f"page_{len(page_paths) + 1:03}.png"
-        buffer.save(page_path, "PNG")
+        buffer.save(page_path, "PNG", compress_level=1)
         split_records.append(
             {
                 "page": len(page_paths) + 1,
@@ -719,19 +719,37 @@ def _find_safe_horizontal_split(
     # A wider band prevents a one-pixel quiet row inside letters or balloon
     # borders from being mistaken for a genuine panel gutter.
     band_radius = 18
+    # Band statistics come from per-row prefix sums: one pass over the image instead
+    # of a fresh mean/std/diff over each 36-row band.
+    width = gray.shape[1]
+    rows = gray.astype(np.float64)
+
+    def prefix(per_row):
+        return np.concatenate(([0.0], np.cumsum(per_row)))
+
+    white_rows = prefix((rows >= 246).sum(axis=1))
+    dark_rows = prefix((rows <= 12).sum(axis=1))
+    sum_rows = prefix(rows.sum(axis=1))
+    square_rows = prefix((rows * rows).sum(axis=1))
+    edge_rows = prefix(np.abs(np.diff(rows, axis=1)).sum(axis=1)) if width > 1 else None
     for y in range(lower, upper + 1, 3):
         if _protected_collision(y, protected) is not None:
             # Hard constraint: cutting here would divide a balloon, a text box or a
             # translation group. No visual score can buy this position back.
             collisions += 1
             continue
-        band = gray[max(0, y - band_radius) : min(gray.shape[0], y + band_radius)]
-        if band.size == 0:
+        top, bottom = max(0, y - band_radius), min(gray.shape[0], y + band_radius)
+        count = (bottom - top) * width
+        if count <= 0:
             continue
-        white_ratio = float(np.mean(band >= 246))
-        dark_ratio = float(np.mean(band <= 12))
-        texture = float(np.std(band))
-        horizontal_edges = float(np.mean(np.abs(np.diff(band, axis=1))))
+        white_ratio = float((white_rows[bottom] - white_rows[top]) / count)
+        dark_ratio = float((dark_rows[bottom] - dark_rows[top]) / count)
+        mean = (sum_rows[bottom] - sum_rows[top]) / count
+        texture = float(np.sqrt(max(0.0, (square_rows[bottom] - square_rows[top]) / count - mean * mean)))
+        horizontal_edges = (
+            float((edge_rows[bottom] - edge_rows[top]) / ((bottom - top) * (width - 1)))
+            if edge_rows is not None else float("nan")
+        )
         distance = abs(y - target) / max(1, upper - lower)
         white_gutter = (
             white_ratio >= 0.92

@@ -199,8 +199,10 @@ proveniência isolada da própria página. O replay histórico não é uma medi�
 de capítulo completo nem define o default distribuído.
 
 Guarda de memória (lida do ambiente por `komyst/config/settings.py`; ver Documentação Técnica §22):
-`LAMA_MIN_FREE_RAM_MB` (padrão `1500`) e `FLUX_MIN_FREE_RAM_MB` (padrão `6000`) são os pisos de RAM
-livre abaixo dos quais LaMa e FLUX se declaram indisponíveis; `LAMA_MAX_CROP_PIXELS` (padrão
+`LAMA_MIN_FREE_RAM_MB` (padrão `1500`) e `FLUX_MIN_FREE_RAM_MB` (padrão `1500`; `6000` com `FLUX_OFFLOAD_TO_CPU=1`) são os pisos de RAM
+livre abaixo dos quais LaMa e FLUX se declaram indisponíveis. O FLUX mantém os pesos na VRAM
+por padrão (pico medido de ~0,7 GB de RAM no `sd-cli` com GPU de 8 GB); `FLUX_OFFLOAD_TO_CPU=1` passa
+`--offload-to-cpu` (~4,6 GB de RAM) para GPUs menores; `LAMA_MAX_CROP_PIXELS` (padrão
 `4000000`) limita a área do recorte do LaMa. Sem `psutil` a guarda não bloqueia.
 
 Entrega enxuta: `KEEP_WORK_FILES` (padrão `False`, `komyst/config/settings.py`) controla se, ao concluir

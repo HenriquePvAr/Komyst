@@ -195,3 +195,23 @@ def test_reference_edit_decodes_the_vae_in_tiles(tmp_path, monkeypatch):
     metrics = {}
     fe._run_reference_edit(np.full((64, 64, 3), 90, np.uint8), tmp_path, "prompt", 4, 5.0, metrics)
     assert "--vae-tiling" in seen["command"]
+
+
+def test_reference_edit_keeps_weights_in_vram_unless_offload_is_requested(tmp_path, monkeypatch):
+    """CPU offload costs ~4.6 GB of system RAM; it is opt-in for small GPUs only."""
+    from komyst.clean.inpainting import flux_edit as fe
+
+    seen = []
+
+    def fake_run(command, **kwargs):
+        seen.append(list(command))
+        raise OSError("stop after capturing the command")
+
+    monkeypatch.setattr(fe.subprocess, "run", fake_run)
+    image = np.full((64, 64, 3), 90, np.uint8)
+    monkeypatch.setattr(fe.settings, "FLUX_OFFLOAD_TO_CPU", False)
+    fe._run_reference_edit(image, tmp_path, "prompt", 4, 5.0, {})
+    monkeypatch.setattr(fe.settings, "FLUX_OFFLOAD_TO_CPU", True)
+    fe._run_reference_edit(image, tmp_path, "prompt", 4, 5.0, {})
+    assert "--offload-to-cpu" not in seen[0]
+    assert "--offload-to-cpu" in seen[1]
