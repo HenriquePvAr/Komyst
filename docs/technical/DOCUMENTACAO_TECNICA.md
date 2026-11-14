@@ -1553,6 +1553,15 @@ Sexta passada (**IMPLEMENTADO**; detalhes em `clean_strategy.md`, "Five follow-u
 - `RENDER_FIT_BALLOON_SHAPE` (padrão `True`, `komyst/config/settings.py`): dentro de balão fechado a
   tradução é quebrada na forma do balão (linhas mais largas no meio), nunca com fonte menor que a do
   encaixe retangular, respeitando a margem do letrista e os outros textos da página.
+- `BUBBLE_DETECTOR_ENABLED` (padrão `False`, **IMPLEMENTADO**, opt-in): `komyst/ocr/bubble_detector.py`
+  roda o RT-DETR-v2 `ogkalu/comic-text-and-bubble-detector` (ONNX, Apache-2.0, pesos fora do pacote;
+  o modelo só detecta caixas, classe 0 = balão) em ladrilhos quadrados sobrepostos da página
+  original (640x640, DirectML sob `DIRECTML_LOCK`, CPU de reserva, sessão e resultado por página em
+  cache). `_balloon_text_area` troca o interior branco (`light_enclosure_interior`) pelo interior do
+  balão detectado que contém o texto: dentro da caixa, área conexa da cor de preenchimento
+  (mediana em Lab), buracos fechados; se ficar abaixo de 35 % da caixa, a elipse inscrita. Sem
+  detecção, desligado ou modelo ausente, o caminho anterior segue idêntico. Medido em 30 páginas de
+  cada capítulo-teste: ~0,25-0,35 s/página no DirectML.
 
 Sétima passada (2026-10-24, **IMPLEMENTADO**):
 

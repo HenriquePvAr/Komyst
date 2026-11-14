@@ -66,3 +66,7 @@ https://github.com/google/fonts/tree/main/ofl/patrickhand — full text: assets/
 
 Luckiest Guy (Astigmatic, Brian J. Bonislawsky) — Apache License 2.0
 https://github.com/google/fonts/tree/main/apache/luckiestguy — full text: assets/fonts/Apache-2.0-LuckiestGuy.txt
+
+Optional model weights (NOT bundled; downloaded by the user, used only when BUBBLE_DETECTOR_ENABLED=1):
+comic-text-and-bubble-detector (RT-DETR-v2 r50vd, ogkalu) — Apache License 2.0
+https://huggingface.co/ogkalu/comic-text-and-bubble-detector
