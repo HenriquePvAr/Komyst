@@ -3765,6 +3765,15 @@ Depois de remover uma pasta, o `artifact_manifest.json` deixa de listar o tipo r
 (`requested/produced/unavailable_artifacts`, `artifact_status`, `capabilities`), para o resumo de
 conclusão não acusar artefato "faltando".
 
+**Re-renderização da revisão de página (IMPLEMENTADO).** `ChapterQualityRevision` apaga a tradução
+anterior nas caixas alteradas (`_clean_previous_translation`) e chama `render_analyzed_image` sobre
+essa página já limpa. Dois contratos: `style_source_bgr` (a página original de `image_path`) é a
+referência de cor/contorno/estilo da tipografia, porque a página limpa não tem mais tinta; e os
+grupos cujo centro cai numa caixa alterada recebem `pre_cleaned=True`, o que faz o renderizador
+desenhar a tradução direto no fundo limpo (com os limites visuais habituais) em vez de procurar texto
+de origem inexistente e cair na placa `_render_translation_label`. A placa continua sendo o último
+recurso quando o desenho direto falha nos limites visuais. Testes: `tests/test_review_precleaned_render.py`.
+
 **Não removidos (leitores ativos):** `input/` e `pages/` (reexportação por `review_reexport`,
 revisão por `chapter_quality_revision`, reconstrução seletiva), `progress.json`,
 `quality_report.json`, `.translation_results/`, `translation_ready.json`, `yk_reservation.json` e

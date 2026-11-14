@@ -3025,6 +3025,7 @@ def render_analyzed_image(
     capture=None,
     typeset=True,
     flux_error_dir=None,
+    style_source_bgr=None,
 ):
     with flux_failure_diagnostic_context(flux_error_dir, page_index), ocr_line_provenance.page(page_index):
         return _render_analyzed_image(
@@ -3040,6 +3041,7 @@ def render_analyzed_image(
             forensic_capture_root=forensic_capture_root,
             capture=capture,
             typeset=typeset,
+            style_source_bgr=style_source_bgr,
         )
 
 
@@ -3056,6 +3058,7 @@ def _render_analyzed_image(
     forensic_capture_root=None,
     capture=None,
     typeset=True,
+    style_source_bgr=None,
 ):
     def timed_substage(name, fn, *args, **kwargs):
         started = time.perf_counter()
@@ -3076,6 +3079,10 @@ def _render_analyzed_image(
         else None
     )
     original = original_bgr.copy()
+    # Page revision re-renders a page whose text is already gone: the typography
+    # must still read colour/outline/style from the page that HAS the lettering.
+    style_bgr = (style_source_bgr if style_source_bgr is not None
+                 and style_source_bgr.shape == original.shape else original)
     if typeset:
         valid_groups = get_translatable_groups(groups)
         render_group_ids = {id(group) for group in valid_groups}
@@ -3210,6 +3217,33 @@ def _render_analyzed_image(
                     preserved_original=True,
                 )
             continue
+
+        if getattr(group, "pre_cleaned", False) and typeset:
+            # The source text is already gone from this region (page revision erased
+            # it before handing the page over): draw straight on the clean background.
+            # Cleanup would find nothing, refuse every strategy and end in the caption
+            # plate, which is not on the original page. A failed bounds check falls
+            # through to the ordinary cascade.
+            direct = _draw_group_translation(
+                before_group, group, font_path, strategy="primary", source_bgr=style_bgr)
+            direct_allowed = _draw_allowed_group_mask(original.shape, group)
+            direct, direct_summary = _enforce_visual_bounds(
+                before_group, direct, direct_allowed, group=group,
+                mask_metrics={"strategy": "pre_cleaned"})
+            group.visual_attempts.append(direct_summary)
+            if (direct_summary.get("visual_validation_passed")
+                    and group.text_overflow_ratio <= config.MAX_TEXT_OVERFLOW_RATIO):
+                final = direct
+                allowed_mask = cv2.bitwise_or(allowed_mask, direct_allowed)
+                group.visual_validation = direct_summary
+                group.redrawn = True
+                group.render_disposition = RENDER_CLEAN
+                group.render_disposition_reason = "rendered_on_pre_cleaned_region"
+                _set_translation_terminal_state(
+                    group, "translated", group.translation_validation_reason or "ok",
+                    preserved_original=False)
+                continue
+            group.visual_attempts.pop()
 
         region_fidelity_uncertain = False
         fallback_mask_candidate = None
@@ -3393,7 +3427,7 @@ def _render_analyzed_image(
                 group,
                 font_path,
                 strategy=strategy,
-                source_bgr=original,
+                source_bgr=style_bgr,
             )
             translated_occupancy = timed_substage("translated_text_occupancy", _translated_text_occupancy_metrics,
                 cleaned,
@@ -3609,7 +3643,7 @@ def _render_analyzed_image(
                         group,
                         font_path,
                         strategy="source_scoped",
-                        source_bgr=original,
+                        source_bgr=style_bgr,
                     )
                 if _rendered is None:
                     rendered = None
@@ -3875,7 +3909,7 @@ def _render_analyzed_image(
                 # review item - instead of shipping the English page.
                 _rescue_draw_t0 = time.perf_counter()
                 rescued_render, rescued_allowed = _render_on_clean_rescue(
-                    before_group, clean_before, inpainted, original, group, clean_mask, font_path)
+                    before_group, clean_before, inpainted, style_bgr, group, clean_mask, font_path)
                 _rescue_draw_dt = time.perf_counter() - _rescue_draw_t0
                 typography_seconds += _rescue_draw_dt
                 redraw_seconds += _rescue_draw_dt
