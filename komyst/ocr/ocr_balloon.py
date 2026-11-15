@@ -3730,7 +3730,12 @@ def _render_analyzed_image(
                     visual_summary.get("visual_validation_passed")
                     and group.text_overflow_ratio <= config.MAX_TEXT_OVERFLOW_RATIO
                 ):
-                    final = rendered
+                    # ``rendered`` was built on the CLEAN buffer, which has none of the
+                    # glyphs earlier groups drew on this page. Carry over only what this
+                    # group changed (its reconstruction and its own glyphs).
+                    changed = np.any(rendered != inpainted, axis=2)
+                    final = before_group.copy()
+                    final[changed] = rendered[changed]
                     accepted = True
                     accepted_cleaned_bgr = advanced_cleaned
                     accepted_cleanup_mask = advanced_fallback_mask
