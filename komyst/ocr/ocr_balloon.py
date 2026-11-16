@@ -18677,6 +18677,27 @@ def _raster_font_choice(source_bgr, group, profile, text, font_path, font_role):
     return {**best, "role_font": Path(role_path).name if role_path else "", "role_score": round(float(role_score), 4)}
 
 
+_SOURCE_LABEL_LINE = re.compile(r"^\s*[A-Za-z][A-Za-z ]{0,24}:\s*\S")
+_TARGET_LABEL_START = re.compile(r"\s+(?=[A-ZÀ-Ý][a-zà-ÿ]+(?: [a-zà-ÿ]+){0,2}:)")
+
+
+def _label_list_items(group, text):
+    """The translation of a "Label: value" list split back into its items, or ``None``.
+
+    A profile block ("Age: 18 / Height: 169 cm / ...") reaches the translator as one
+    run; its items are recovered from the labels the translation itself carries, and
+    only when it carries as many as the source has lines.
+    """
+    lines = [str(getattr(line, "text", "") or "") for line in getattr(group, "lines", None) or []]
+    labelled = [line for line in lines if _SOURCE_LABEL_LINE.match(line)]
+    if len(labelled) < 3 or len(labelled) < 0.75 * len(lines):
+        return None
+    items = [item.strip() for item in _TARGET_LABEL_START.split(str(text or "")) if item.strip()]
+    if len(items) != len(labelled) or not all(":" in item for item in items):
+        return None
+    return items
+
+
 def _draw_group_translation(img_bgr, group, font_path, strategy="primary", source_bgr=None):
     # Translations stored before the OCR normalised censoring can still carry the ideographs the
     # OCR read for asterisks; they would be drawn as missing-glyph boxes.
@@ -18855,7 +18876,12 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         wrap_width = int(content_w * float(
             typography_profile.get("content_width_ratio") or (
                 0.8 if style.name == "decorative_purple" else 1.0)))
-        if config.AUTO_LINE_WRAP and typography_profile.get("font_class") in {
+        list_items = _label_list_items(group, text) if config.AUTO_LINE_WRAP else None
+        if list_items:
+            # A "Label: value" list keeps one item per line, as the source sets it.
+            lines = [part for item in list_items for part in _wrap_text(
+                draw, item, font, max_width=max(12, wrap_width), split_long_words=font_size <= min_font)]
+        elif config.AUTO_LINE_WRAP and typography_profile.get("font_class") in {
             "condensed_display", "tall_display",
         }:
             max_chars = max(8, int(max(12, wrap_width) / max(1, font_size * 0.58)))

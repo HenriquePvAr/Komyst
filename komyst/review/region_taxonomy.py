@@ -537,7 +537,7 @@ def weak_label_semantic_promotion_allowed(
         return True
     # A trailing ellipsis is narration trailing off ("But his body..."); signs and
     # labels do not trail off.
-    if len(real_words) >= 3 and len(real_words) == len(words) and re.search(r"(?:\.\.|…)\s*$", body):
+    if len(real_words) >= 3 and len(real_words) >= 0.75 * len(words) and re.search(r"(?:\.\.|…)\s*$", body):
         return True
     folded = [re.sub(r"[^A-Z']", "", word.upper()) for word in words]
     has_clause_marker = any(_is_clause_marker(word) for word in folded)

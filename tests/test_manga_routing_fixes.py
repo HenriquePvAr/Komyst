@@ -188,3 +188,14 @@ def test_one_subject_pronoun_genders_a_repeated_rare_name():
     names = pw.chapter_name_candidates(sources)
     assert "ASTA" in names
     assert pw.chapter_name_genders(sources, names).get("ASTA") == "m"
+
+
+def test_label_list_translation_keeps_one_item_per_line():
+    def line(text):
+        return ob.OCRLine(text=text, confidence=0.9, polygon=np.zeros((4, 2)), box=(0, 0, 10, 10), raw_text=text)
+    group = ob.TextGroup(group_id="G", lines=[line(t) for t in (
+        "Age: 18", "Height: 169 cm", "Sign: Aries", "Likes: Spicy foods,", "manly men")])
+    target = "Idade: 18 Altura: 169 cm Signo: Áries Gosta de: Comidas apimentadas, homens másculos"
+    assert ob._label_list_items(group, target) == [
+        "Idade: 18", "Altura: 169 cm", "Signo: Áries", "Gosta de: Comidas apimentadas, homens másculos"]
+    assert ob._label_list_items(group, "Uma frase qualquer sem rótulos") is None
