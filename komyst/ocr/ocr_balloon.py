@@ -754,6 +754,7 @@ def _analyze_image_array(original_bgr, raw_lines, page_index=None):
         items=len(candidates),
     ):
         _reclaim_short_lexical_lines(groups, candidates, original.shape)
+        _recover_missed_leading_lines(groups, original)
     with profile_step(
         "analyze.associate_ignored_cleanup_lines",
         page_index=page_index,
@@ -1584,6 +1585,34 @@ def _join_shattered_word(match):
     return match.group(0)
 
 
+_STROKE_TOKEN = re.compile(r"(?<!\S)[Il|]{1,3}[.,](?=[a-z])")
+_STROKE_PREFIX = re.compile(r"(?<![A-Za-z])([A-Z]{1,2})([a-z]{3,}(?:['’][a-z]+)?)(?![A-Za-z])")
+
+
+def _drop_stroke_artifacts(text):
+    """Art strokes the OCR read as letters inside mixed-case lettering.
+
+    A panel frame or a sword edge beside a word reads as "C" or "II": "Cbody's",
+    "But his II.body...". Only in lettering that writes lower case (where a capital
+    glued to a lower-case word is not how the letterer wrote it): a capital prefix is
+    dropped when the rest is a word and the whole is not, and vertical strokes glued in
+    front of a lower-case word ("II.body") are removed; a free-standing "II" is a numeral. The single pronoun "I" is never touched.
+    """
+    if not re.search(r"[a-z]{2,}", text):
+        return text
+
+    def prefix(match):
+        whole, rest = match.group(0), match.group(2)
+        bare = re.sub(r"['’].*$", "", rest).upper()
+        if region_taxonomy.is_english_word(re.sub(r"[^A-Z]", "", whole.upper())) or not (
+                region_taxonomy.is_english_word(bare) or region_taxonomy.word_zipf(bare) >= 3.0):
+            return whole
+        return rest
+
+    text = _STROKE_PREFIX.sub(prefix, text)
+    return re.sub(r"\s{2,}", " ", _STROKE_TOKEN.sub("", text)).strip()
+
+
 def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words=frozenset()):
     """``text`` with OCR-damaged tokens repaired before translation.
 
@@ -1600,6 +1629,7 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
     scraps spell one frequent word.
     """
     text = _SHATTERED_WORD.sub(_join_shattered_word, str(text or ""))
+    text = _drop_stroke_artifacts(text)
     protected_keys = {_name_token_of(name) for name in protected or ()}
     names = sorted({key for key in (_name_token_of(name) for name in chapter_names or ())
                     if len(key) >= 3}, key=len, reverse=True)
@@ -1633,6 +1663,9 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
             split = _split_before_hyphen_name(token, run.group(0), hyphen_names)
             if split:
                 return split
+            if key in hyphen_syllables:
+                # The first syllable of a hyphenated name ("TOAN-KI") is not glued words.
+                return token
         camel = re.findall(r"[A-Z][a-z]+", token)
         if token.isalpha() and len(camel) > 1 and "".join(camel) == token and all(
                 region_taxonomy.is_english_word(part.upper()) for part in camel):
@@ -4151,7 +4184,7 @@ def get_font(font_path, size, role="regular", *, prefer_role=False, text=""):
 
 
 def _keep_short_words_stacked_on_text(candidates):
-    """A common two-letter word ("Up") is noise alone, but not stacked right on a kept line.
+    """A common short word ("Up", "...a") is noise alone, but not stacked right on a kept line.
 
     "Up / until now.." lost its first word to the short-text noise rule before grouping.
     The word must be frequent English, read with fair confidence, and sit directly above or
@@ -4161,8 +4194,11 @@ def _keep_short_words_stacked_on_text(candidates):
     for candidate in candidates:
         line = candidate.line
         word = re.sub(r"[^A-Za-z]", "", str(line.text or "")).upper()
-        if (candidate.ignore_reason != "noise_like_text" or len(word) != 2
-                or float(line.confidence or 0.0) < 0.6 or region_taxonomy.word_zipf(word) < 5.0):
+        # A lone letter is a word only when it is as common as the words themselves
+        # (Zipf: the pronoun and the article >= 7, every other letter < 6).
+        if (candidate.ignore_reason not in {"noise_like_text", "too_few_useful_chars"}
+                or len(word) not in (1, 2) or float(line.confidence or 0.0) < 0.6
+                or region_taxonomy.word_zipf(word) < (5.0 if len(word) == 2 else 6.5)):
             continue
         x, y, w, h = line.box
         for other in kept:
@@ -9972,6 +10008,64 @@ def _shared_open_visual_region_cleanup_owner(line, group):
     if max(group_coverages or [0.0]) < 0.45:
         return False
     return _group_has_story_translation_authority(group)
+
+
+def _recover_missed_leading_lines(groups, image_bgr):
+    """A short first line the OCR detector returned no box for, read by the recognizer.
+
+    A word lettered alone on the first line of a balloon ("I / MEAN, GEEZ,") can be
+    too small for the page detector, so the group loses it. Free-standing ink of the
+    group's letter height right above its first line, inside a light balloon, is
+    cropped and read by the OCR recognizer; a frequent word read with confidence
+    joins the group as its first line. The text always comes from the recognizer.
+    """
+    if image_bgr is None:
+        return
+    from komyst.ocr.sfx_region_reocr import recognize_line_crop
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    for group in groups:
+        lines = reading_order(list(group.lines or []))
+        if group.ignored or not lines or not re.match(r"[A-Za-z]", str(lines[0].text or "")):
+            continue
+        x, y, w, h = (int(v) for v in lines[0].box)
+        if h < 12:
+            continue
+        top, left, right = max(0, y - int(1.3 * h)), max(0, x - h // 2), min(width, x + w + h // 2)
+        band = gray[top:y, left:right]
+        if band.size == 0 or float(np.median(band)) < 200:
+            continue
+        count, _labels, stats, _c = cv2.connectedComponentsWithStats(
+            (band < 110).astype(np.uint8), connectivity=8)
+        # Art reaching into the band touches its edge; only free-standing ink counts.
+        blobs = [stats[i] for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= 12
+                 and stats[i, 0] > 0 and stats[i, 1] > 0 and stats[i, 0] + stats[i, 2] < band.shape[1]
+                 and stats[i, 1] + stats[i, 3] < band.shape[0]]
+        if not blobs:
+            continue
+        bx1 = min(int(b[0]) for b in blobs)
+        by1 = min(int(b[1]) for b in blobs)
+        bx2 = max(int(b[0] + b[2]) for b in blobs)
+        by2 = max(int(b[1] + b[3]) for b in blobs)
+        if not 0.5 * h <= by2 - by1 <= 1.0 * h or by2 < band.shape[0] - h:
+            continue
+        pad = max(4, (by2 - by1) // 4)
+        box = (left + bx1 - pad, top + by1 - pad, bx2 - bx1 + 2 * pad, by2 - by1 + 2 * pad)
+        crop = image_bgr[max(0, box[1]):box[1] + box[3], max(0, box[0] - pad):box[0] + box[2] + pad]
+        text, confidence = recognize_line_crop(crop)
+        word = re.sub(r"[^A-Za-z]", "", text)
+        if (not word or word != text.strip() or confidence < 0.75
+                or not (region_taxonomy.is_english_word(word.upper())
+                        or region_taxonomy.word_zipf(word.upper()) >= 5.0)):
+            continue
+        line = OCRLine(text=word, confidence=float(confidence), polygon=np.array(
+            [[box[0], box[1]], [box[0] + box[2], box[1]], [box[0] + box[2], box[1] + box[3]],
+             [box[0], box[1] + box[3]]], dtype=np.float32), box=box, raw_text=text,
+            engine="rapidocr_line_recovery")
+        ocr_line_provenance.record_input_lines([line], origin="missed_leading_line_recovery")
+        group.lines = reading_order([line, *group.lines])
+        group.text = clean_ocr_text(" ".join(item.text for item in group.lines))
 
 
 def _reclaim_short_lexical_lines(groups, candidates, image_shape):

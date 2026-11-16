@@ -108,3 +108,56 @@ def restore_corrupted_source_words(translation: str, source: str, unknown: list[
             repaired = re.sub(rf"\b{re.escape(bad)}\b", best.upper(), repaired, flags=re.IGNORECASE)
             candidates.remove(best)
     return repaired
+
+
+_MALE_PRONOUNS = re.compile(r"\b(?:HE|HIS|HIM|HIMSELF)\b")
+_FEMALE_PRONOUNS = re.compile(r"\b(?:SHE|HER|HERS|HERSELF)\b")
+# Portuguese contractions of the article before a name, masculine <-> feminine.
+_ARTICLE_SWAP = {"O": "A", "DO": "DA", "NO": "NA", "PELO": "PELA", "AO": "À"}
+
+
+def chapter_name_genders(sources, names):
+    """Grammatical gender of each name, from the English pronouns the chapter uses with it.
+
+    Only lines that mention exactly one of the names count; a name is gendered when its
+    pronouns agree at least twice and never disagree. Nothing is assumed from the
+    name's spelling (Portuguese guesses "a Asta" from the final -a).
+    """
+    upper_names = sorted({str(name).upper() for name in names or () if len(str(name)) >= 3})
+    counts = {name: [0, 0] for name in upper_names}
+    for source in sources or ():
+        text = str(source or "").upper()
+        present = [name for name in upper_names if re.search(rf"\b{re.escape(name)}\b", text)]
+        if len(present) != 1:
+            continue
+        counts[present[0]][0] += len(_MALE_PRONOUNS.findall(text))
+        counts[present[0]][1] += len(_FEMALE_PRONOUNS.findall(text))
+    genders = {}
+    for name, (male, female) in counts.items():
+        if male >= 2 and not female:
+            genders[name] = "m"
+        elif female >= 2 and not male:
+            genders[name] = "f"
+    return genders
+
+
+def align_name_articles(target, genders):
+    """The article/contraction right before a gendered name made to agree with it."""
+    text = str(target or "")
+    for name, gender in genders.items():
+        wanted = _ARTICLE_SWAP if gender == "f" else {v: k for k, v in _ARTICLE_SWAP.items()}
+
+        def swap(match):
+            article = match.group(1)
+            replacement = wanted.get(article.upper())
+            if replacement is None:
+                return match.group(0)
+            if article.islower():
+                replacement = replacement.lower()
+            elif article[0].isupper() and not article.isupper():
+                replacement = replacement.capitalize()
+            return f"{replacement}{match.group(2)}"
+
+        keys = "|".join(re.escape(k) for k in sorted(wanted, key=len, reverse=True))
+        text = re.sub(rf"\b({keys})(\s+{re.escape(name)}\b)", swap, text, flags=re.IGNORECASE)
+    return text

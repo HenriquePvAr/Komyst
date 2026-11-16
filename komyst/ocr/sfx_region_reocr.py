@@ -50,6 +50,26 @@ def _rapid_crop_reads(crop_bgr: np.ndarray) -> list[str]:
     return [str(item[1]) for item in (result or [])]
 
 
+def recognize_line_crop(crop_bgr: np.ndarray) -> tuple[str, float]:
+    """Recognizer-only read of a crop already known to hold one line: (text, confidence)."""
+    global _rapid_engine
+    if crop_bgr is None or crop_bgr.size == 0:
+        return "", 0.0
+    with _engine_lock:
+        if _rapid_engine is None:
+            from rapidocr_onnxruntime import RapidOCR
+
+            _rapid_engine = RapidOCR()
+    try:
+        result, _ = _rapid_engine(crop_bgr, use_det=False, use_cls=False, use_rec=True)
+    except Exception:  # noqa: BLE001 - a failed read is just no evidence
+        return "", 0.0
+    if not result:
+        return "", 0.0
+    text, confidence = result[0][0], result[0][1]
+    return str(text or ""), float(confidence or 0.0)
+
+
 def prewarm_sfx_paddle() -> None:
     """Spawn the isolated Paddle worker early so its model load overlaps the
     download stage instead of blocking the first escalation."""

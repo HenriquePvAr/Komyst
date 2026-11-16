@@ -134,3 +134,44 @@ def test_dropped_punctuation_line_costs_no_ocr_quality():
 def test_echoed_laughter_is_a_legitimate_preserve_but_a_sentence_is_not():
     assert ob._echo_is_name_shaped(_group("AH HA HA HA!", classification="narration"))
     assert not ob._echo_is_name_shaped(_group("I LOVE YOU SO MUCH", classification="narration"))
+
+
+def test_missed_first_line_is_read_by_the_recognizer_not_assumed():
+    from PIL import Image, ImageDraw, ImageFont
+    image = Image.new("RGB", (400, 260), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype("comicbd.ttf", 34)  # serifed "I", as comic lettering draws it
+    draw.text((170, 40), "I", font=font, fill=(0, 0, 0))
+    draw.text((120, 95), "MEAN,", font=font, fill=(0, 0, 0))
+    bgr = np.array(image)[:, :, ::-1].copy()
+    line = ob.OCRLine(text="MEAN,", confidence=0.99, polygon=np.zeros((4, 2)),
+                      box=(118, 92, 126, 42), raw_text="MEAN,")
+    group = ob.TextGroup(group_id="G", lines=[line], text="MEAN,")
+    ob._recover_missed_leading_lines([group], bgr)
+    assert group.text == "I MEAN,"
+    empty = ob.TextGroup(group_id="H", lines=[ob.OCRLine(text="MEAN,", confidence=0.99,
+                         polygon=np.zeros((4, 2)), box=(118, 92, 126, 42), raw_text="MEAN,")], text="MEAN,")
+    ob._recover_missed_leading_lines([empty], np.full_like(bgr, 255))
+    assert empty.text == "MEAN,"
+
+
+def test_art_strokes_read_as_letters_are_dropped_from_mixed_case_lettering():
+    assert ob.split_glued_source_words("His well-trained Cbody's super reflexes..") == (
+        "His well-trained body's super reflexes..")
+    assert ob.split_glued_source_words("But his II.body...") == "But his body..."
+    for keep in ("McDonald is here", "World War II ends", "I can do it", "It is an Apple phone"):
+        assert ob.split_glued_source_words(keep) == keep
+
+
+def test_name_gender_comes_from_the_chapter_pronouns_not_the_spelling():
+    sources = ["Asta had cut through magic with his muscles", "Asta could not see it. He tried",
+               "Noelle said she would come, her wand ready", "It's Asta!"]
+    genders = pw.chapter_name_genders(sources, ["Asta", "Noelle"])
+    assert genders == {"ASTA": "m", "NOELLE": "f"}
+    assert pw.align_name_articles("É a Asta! O cérebro da Asta", genders) == "É o Asta! O cérebro do Asta"
+    assert pw.align_name_articles("o Noelle", genders) == "a Noelle"
+    assert pw.chapter_name_genders(["Kai said he and she left"], ["Kai"]) == {}
+
+
+def test_two_everyday_words_glued_are_split_even_when_a_rare_word_is_one_edit_away():
+    assert ob.split_glued_source_words("WAIT, ISHE DEAD...?") == "WAIT, IS HE DEAD...?"
