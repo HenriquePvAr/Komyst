@@ -1532,6 +1532,7 @@ def _restore_shape(token, letters):
 _ENGLISH_CONTRACTION_TAILS = frozenset({"S", "T", "LL", "RE", "VE", "D", "M", "EM", "CAUSE", "N"})
 # Tails of contractions that attach to a whole word; negations ("N'T") are left alone.
 _GLUED_HEAD_CONTRACTION_TAILS = frozenset({"S", "LL", "RE", "VE", "D", "M"})
+_DETERMINERS = frozenset({"THE", "A", "AN", "MY", "OUR", "YOUR", "HIS", "HER", "THEIR", "THIS", "THAT"})
 _PLACE_NOUN_AFTER = re.compile(
     r"\s+(?:VILLAGE|TOWN|CITY|KINGDOM|EMPIRE|CASTLE|MOUNTAINS?|FOREST|RIVER|ISLAND|ACADEMY|SQUAD)\b",
     re.IGNORECASE)
@@ -1613,9 +1614,12 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
         if (len(key) < 4 or key in protected_keys or key in names or region_taxonomy.is_english_word(key)
                 or region_taxonomy.word_zipf(key) >= 3.0):
             return token
-        # A word naming a place ("RAYAKA VILLAGE") is that place's name, not glued words.
+        # A word naming a place ("RAYAKA VILLAGE") is that place's name, not glued words -
+        # unless it splits into words ending in a determiner ("NUN FROM MY VILLAGE").
         if _PLACE_NOUN_AFTER.match(match.string[match.end():]):
-            return token
+            pieces = region_taxonomy.segment_words(key) if token.isalpha() else None
+            if not (pieces and len(pieces) > 1 and pieces[-1] in _DETERMINERS):
+                return token
         head, apostrophe, tail = (re.split(r"(['’])", token, maxsplit=1) + ["", ""])[:3]
         if apostrophe and tail.upper() not in _ENGLISH_CONTRACTION_TAILS:
             # A contraction glued to the next word: "I'MFROM" -> I'M FROM.
@@ -1629,6 +1633,11 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
             split = _split_before_hyphen_name(token, run.group(0), hyphen_names)
             if split:
                 return split
+        camel = re.findall(r"[A-Z][a-z]+", token)
+        if token.isalpha() and len(camel) > 1 and "".join(camel) == token and all(
+                region_taxonomy.is_english_word(part.upper()) for part in camel):
+            # Capitals mark the word starts the OCR glued: "TheBlackBulls" -> The Black Bulls.
+            return " ".join(camel)
         if token.isalpha():
             for name in names:
                 if key.endswith(name) and len(key) - len(name) >= 2:
@@ -2178,8 +2187,10 @@ def _echo_is_name_shaped(group):
     # Common vocabulary, not the full lexicon (which lists "kang", "min").
     from komyst.ocr.ocr_engine import COMMON_ENGLISH_WORDS
     words = re.findall(r"[A-Za-z]+", str(getattr(group, "text", "") or ""))
-    # Short only (<= 3 words): an echoed sentence is a translation that failed.
-    return bool(words) and len(words) <= 3 and not any(
+    # Short only (<= 3 words): an echoed sentence is a translation that failed. A longer
+    # run of at most two repeated sounds ("AH HA HA HA!") is laughter, not a sentence.
+    short = len(words) <= 3 or len({word.upper() for word in words}) <= 2
+    return bool(words) and short and not any(
         len(word) >= 3 and word.lower() in COMMON_ENGLISH_WORDS for word in words)
 
 
@@ -6292,9 +6303,12 @@ def score_group_ocr_quality(group):
             and sum(not ("A" <= char.upper() <= "Z") for char in letters) * 2 >= len(letters)):
         return (0.8 if group.cleanup_lines else 0.9), ["non_latin_script"]
 
-    if group.cleanup_lines:
+    # A dropped line of bare punctuation ("!!!" under the words) loses no words.
+    worded = [line for line in group.cleanup_lines or ()
+              if re.search(r"[A-Za-z0-9]", str(getattr(line, "text", "") or ""))]
+    if worded:
         reasons.append("ignored_line_inside_text_region")
-        score -= min(0.45, 0.22 + len(group.cleanup_lines) * 0.1)
+        score -= min(0.45, 0.22 + len(worded) * 0.1)
 
     non_ascii_letters = [
         char

@@ -110,3 +110,27 @@ def test_prose_whose_dots_the_ocr_dropped_may_use_the_learned_last_resort():
     sign = _group("GRAND OPENING", classification="narration")
     assert ob._last_resort_allowed(group) or not ob._group_has_story_translation_authority(group)
     assert not ob._last_resort_allowed(sign)
+
+
+def test_glued_words_before_a_place_noun_split_when_they_end_in_a_determiner():
+    assert ob.split_glued_source_words("THE NUNFROMMY VILLAGE!") == "THE NUN FROM MY VILLAGE!"
+    assert ob.split_glued_source_words("FROM RAYAKA VILLAGE") == "FROM RAYAKA VILLAGE"
+
+
+def test_camel_case_glue_splits_at_capitals():
+    assert ob.split_glued_source_words("TheBlackBulls") == "The Black Bulls"
+    assert ob.split_glued_source_words("YouTube") == "YouTube"
+
+
+def test_dropped_punctuation_line_costs_no_ocr_quality():
+    from tests.test_proper_name_routing import _line
+    group = _group("IT'S GREAT TO MEETCHA", classification="narration")
+    group.cleanup_lines = [_line("!!!")]
+    assert "ignored_line_inside_text_region" not in ob.score_group_ocr_quality(group)[1]
+    group.cleanup_lines = [_line("TO")]
+    assert "ignored_line_inside_text_region" in ob.score_group_ocr_quality(group)[1]
+
+
+def test_echoed_laughter_is_a_legitimate_preserve_but_a_sentence_is_not():
+    assert ob._echo_is_name_shaped(_group("AH HA HA HA!", classification="narration"))
+    assert not ob._echo_is_name_shaped(_group("I LOVE YOU SO MUCH", classification="narration"))
