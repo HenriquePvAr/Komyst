@@ -103,3 +103,10 @@ def test_shout_cut_into_scraps_is_joined_but_a_stutter_is_not():
     assert ob.split_glued_source_words("A WE SO ME!") == "AWESOME!"
     assert ob.split_glued_source_words("I I I CAN'T") == "I I I CAN'T"
     assert ob.split_glued_source_words("IT IS UP TO ME") == "IT IS UP TO ME"
+
+
+def test_prose_whose_dots_the_ocr_dropped_may_use_the_learned_last_resort():
+    group = _group("his kinetic Vision and his explosive power", classification="narration")
+    sign = _group("GRAND OPENING", classification="narration")
+    assert ob._last_resort_allowed(group) or not ob._group_has_story_translation_authority(group)
+    assert not ob._last_resort_allowed(sign)

@@ -2432,6 +2432,9 @@ def _last_resort_allowed(group):
             or w.upper() in region_taxonomy._STORY_CLAUSE_MARKERS]
     sentence = len(real) >= 2 and (
         re.search(r"[.!?,…]", text)
+        # The OCR often drops the dots of "...his kinetic vision and his explosive power.";
+        # four real words that make up most of the text are prose, not a sign or a credit.
+        or (len(real) >= 4 and len(real) >= 0.7 * len(words))
         or any(w.upper() in region_taxonomy._STORY_CLAUSE_MARKERS for w in words)
         or _decorative_textured_story_promotion_allowed(group)
         or _decorative_short_display_story_promotion_allowed(group)
@@ -3388,7 +3391,15 @@ def _render_analyzed_image(
                         "local_background_class", ""
                     )).lower() in {"gradient", "structured_or_textured"}
                 )
-                if complex_background and mask_metrics["fill_mask_to_text_area_ratio"] > 2.0:
+                # Outlined lettering owns about twice its ink (the outline is lettering too),
+                # so the ink-relative limit is judged on the validated mask; the fill may only
+                # grow that mask moderately (its halo), never stand on art far beyond it.
+                outlined_fill_ok = (
+                    float(mask_metrics.get("mask_to_text_area_ratio") or 99.0) <= 2.0
+                    and fill_mask_pixels <= 1.5 * max(1, mask_pixels)
+                )
+                if (complex_background and mask_metrics["fill_mask_to_text_area_ratio"] > 2.0
+                        and not outlined_fill_ok):
                     mask_metrics["mask_valid"] = False
                     mask_metrics["reason"] = "complex_background_mask_exceeds_text_area_limit"
                     mask_metrics["narrow_mask_reconstruction_retry"] = True
@@ -14961,6 +14972,17 @@ def _remove_text_for_group(
             metrics["structure_protected_pixels"] = int(np.count_nonzero(protect))
             metrics["mask_pixels"] = int(np.count_nonzero(cleanup_mask))
             boundary_conflict = {**boundary_conflict, "status": "structure_continued"}
+    if (boundary_conflict["status"] == "review_required"
+            and not boundary_conflict.get("candidate_curved_segment_count")
+            and (getattr(group, "background_metrics", None) or {}).get(
+                "local_background_spatial_class") == "PROVEN_UNIFORM"
+            and _conflict_is_lettering_outline(original_bgr, group, boundary_conflict)):
+        # The ring round the lettering was measured as one tone, so no art line crosses
+        # out of it, and the "line" has the colour of the lettering's own outline (the
+        # white strokes of two stacked outlined lines merge into a horizontal band).
+        # A line in the ink's colour stays a review case (strike-through or art).
+        boundary_conflict = {**boundary_conflict, "status": "uniform_ring_no_art_line"}
+        metrics["boundary_conflict_dismissed_by_uniform_ring"] = True
     if boundary_conflict["status"] == "review_required":
         metrics["mask_valid"] = False
         metrics["review_required"] = True
@@ -20410,6 +20432,49 @@ def _neutral_ink_family(bgr):
     return None
 
 
+def _white_outlined_dark_ink(roi_bgr):
+    """(white outline, dark ink) masks when the lettering is dark ink inside a white outline.
+
+    Dark ink enclosed by the white footprint is the fill when it is shaped like strokes
+    (area-weighted elongation >= 4) and is a real share (>= 25 %) of the white: the
+    counters of plain white lettering are compact blobs or a tiny share. ``None`` otherwise.
+    """
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    val, sat = hsv[:, :, 2], hsv[:, :, 1]
+    white = ((val >= 185) & (sat <= 75)).astype(np.uint8)
+    _n, outside = cv2.connectedComponents(1 - white, connectivity=4)
+    edge = np.unique(np.concatenate([outside[0], outside[-1], outside[:, 0], outside[:, -1]]))
+    enclosed = ((white == 0) & ~np.isin(outside, edge) & (val <= 70)).astype(np.uint8)
+    enclosed_px = int(enclosed.sum())
+    if enclosed_px < 60 or enclosed_px < 0.25 * int(white.sum()):
+        return None
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(enclosed, connectivity=8)
+    dist = cv2.distanceTransform(enclosed, cv2.DIST_L2, 3)
+    areas = [int(stats[i, cv2.CC_STAT_AREA]) for i in range(1, count)]
+    elongation = [a / max(1.0, (2.0 * float(dist[labels == i].max())) ** 2)
+                  for i, a in zip(range(1, count), areas)]
+    if not sum(areas) or float(np.average(elongation, weights=areas)) < 4.0:
+        return None
+    return white > 0, enclosed > 0
+
+
+def _conflict_is_lettering_outline(original_bgr, group, boundary_conflict):
+    """The conflicting "line" pixels are the white outline of white-outlined dark lettering."""
+    conflict = boundary_conflict.get("conflict_mask")
+    lines = [line for line in (getattr(group, "lines", None) or []) if getattr(line, "box", None)]
+    if not isinstance(conflict, np.ndarray) or not np.any(conflict) or not lines:
+        return False
+    height, width = original_bgr.shape[:2]
+    x1 = max(0, min(int(l.box[0]) for l in lines) - 8)
+    y1 = max(0, min(int(l.box[1]) for l in lines) - 8)
+    x2 = min(width, max(int(l.box[0] + l.box[2]) for l in lines) + 8)
+    y2 = min(height, max(int(l.box[1] + l.box[3]) for l in lines) + 8)
+    if x2 - x1 < 8 or y2 - y1 < 8 or _white_outlined_dark_ink(original_bgr[y1:y2, x1:x2]) is None:
+        return False
+    gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
+    return float(np.median(gray[conflict > 0])) >= 185.0
+
+
 def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
     """Infer style from the source lettering pixels owned by this region.
 
@@ -20589,23 +20654,14 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
         # On a dark panel the dark fill matches the page, so it never enters ``glyph_mask``:
         # dark ink enclosed by the white footprint is the fill when it is shaped like strokes.
         # The counters of plain white lettering are compact blobs (elongation ~1) or a tiny share.
-        white = ((val >= 185) & (sat <= 75)).astype(np.uint8)
-        _n, outside = cv2.connectedComponents(1 - white, connectivity=4)
-        edge = np.unique(np.concatenate([outside[0], outside[-1], outside[:, 0], outside[:, -1]]))
-        enclosed = ((white == 0) & ~np.isin(outside, edge) & (val <= 70)).astype(np.uint8)
-        enclosed_px = int(enclosed.sum())
-        if enclosed_px >= 60 and enclosed_px >= 0.25 * int(white.sum()):
-            count, labels, stats, _c = cv2.connectedComponentsWithStats(enclosed, connectivity=8)
-            dist = cv2.distanceTransform(enclosed, cv2.DIST_L2, 3)
-            areas = [int(stats[i, cv2.CC_STAT_AREA]) for i in range(1, count)]
-            elongation = [a / max(1.0, (2.0 * float(dist[labels == i].max())) ** 2)
-                          for i, a in zip(range(1, count), areas)]
-            if sum(areas) and float(np.average(elongation, weights=areas)) >= 4.0:
-                stroke_color = tuple(int(v) for v in np.median(roi[white > 0], axis=0))
-                dominant_bgr = np.median(roi[enclosed > 0], axis=0)
-                color_family = "black"
-                stroke_present = True
-                stroke_confidence = max(stroke_confidence, 0.6)
+        outlined = _white_outlined_dark_ink(roi)
+        if outlined is not None:
+            white, enclosed = outlined
+            stroke_color = tuple(int(v) for v in np.median(roi[white], axis=0))
+            dominant_bgr = np.median(roi[enclosed], axis=0)
+            color_family = "black"
+            stroke_present = True
+            stroke_confidence = max(stroke_confidence, 0.6)
     glow_strength = 0
     glow_color = None
     # A glow must reinforce the ink's own already-established dominant color
