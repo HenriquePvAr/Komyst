@@ -175,3 +175,16 @@ def test_name_gender_comes_from_the_chapter_pronouns_not_the_spelling():
 
 def test_two_everyday_words_glued_are_split_even_when_a_rare_word_is_one_edit_away():
     assert ob.split_glued_source_words("WAIT, ISHE DEAD...?") == "WAIT, IS HE DEAD...?"
+
+
+def test_three_real_words_trailing_off_are_narration_not_a_label():
+    from komyst.review import region_taxonomy as rt
+    assert rt.weak_label_semantic_promotion_allowed("unknown", "But his body...")
+    assert not rt.weak_label_semantic_promotion_allowed("unknown", "ROYAL MAGIC ACADEMY")
+
+
+def test_one_subject_pronoun_genders_a_repeated_rare_name():
+    sources = ["Asta had cut through magic with his muscles", "It's Asta!", "I'M ASTA FROM HAGE"]
+    names = pw.chapter_name_candidates(sources)
+    assert "ASTA" in names
+    assert pw.chapter_name_genders(sources, names).get("ASTA") == "m"

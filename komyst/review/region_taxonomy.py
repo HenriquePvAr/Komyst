@@ -535,6 +535,10 @@ def weak_label_semantic_promotion_allowed(
     real_words = [word for word in words if _is_real_word(word)]
     if len(real_words) >= 4:
         return True
+    # A trailing ellipsis is narration trailing off ("But his body..."); signs and
+    # labels do not trail off.
+    if len(real_words) >= 3 and len(real_words) == len(words) and re.search(r"(?:\.\.|…)\s*$", body):
+        return True
     folded = [re.sub(r"[^A-Z']", "", word.upper()) for word in words]
     has_clause_marker = any(_is_clause_marker(word) for word in folded)
     has_sentence_punctuation = bool(re.search(r"[.!?…]", body))

@@ -112,7 +112,11 @@ from komyst.pipeline.pipeline_cache import (
 from komyst.pipeline.session_context import SessionContextStore
 from komyst.export.png_output import export_final_pages_png, PngExportError
 from komyst.translation.providers.komyst_backend_provider import SystemicTranslationFailure
-from komyst.translation.portuguese_words import align_name_articles, chapter_name_genders
+from komyst.translation.portuguese_words import (
+    align_name_articles,
+    chapter_name_candidates,
+    chapter_name_genders,
+)
 from komyst.translation.sfx_glossary import translate_sfx_fuzzy
 
 _RAPIDOCR_INFERENCE_LOCK = threading.BoundedSemaphore(1)
@@ -3894,7 +3898,7 @@ def run_benchmark(args):
     # English pronouns decide it instead.
     name_genders = chapter_name_genders(
         [group.text for group in all_analyzed_groups],
-        [*detected_names, *chapter_recurring_tokens(group.text for group in all_analyzed_groups)])
+        [*detected_names, *chapter_name_candidates([group.text for group in all_analyzed_groups])])
     if name_genders and translations:
         translations = [align_name_articles(value, name_genders) if value else value
                         for value in translations]

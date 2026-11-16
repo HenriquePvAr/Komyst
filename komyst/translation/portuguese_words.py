@@ -119,8 +119,9 @@ _ARTICLE_SWAP = {"O": "A", "DO": "DA", "NO": "NA", "PELO": "PELA", "AO": "À"}
 def chapter_name_genders(sources, names):
     """Grammatical gender of each name, from the English pronouns the chapter uses with it.
 
-    Only lines that mention exactly one of the names count; a name is gendered when its
-    pronouns agree at least twice and never disagree. Nothing is assumed from the
+    Only lines that mention exactly one of the names count, and only subject/possessive
+    pronouns (an object "her"/"him" usually points at someone else); a name is gendered
+    when its pronouns agree and never disagree. Nothing is assumed from the
     name's spelling (Portuguese guesses "a Asta" from the final -a).
     """
     upper_names = sorted({str(name).upper() for name in names or () if len(str(name)) >= 3})
@@ -134,11 +135,23 @@ def chapter_name_genders(sources, names):
         counts[present[0]][1] += len(_FEMALE_PRONOUNS.findall(text))
     genders = {}
     for name, (male, female) in counts.items():
-        if male >= 2 and not female:
+        if male and not female:
             genders[name] = "m"
-        elif female >= 2 and not male:
+        elif female and not male:
             genders[name] = "f"
     return genders
+
+
+def chapter_name_candidates(sources, minimum=2):
+    """Rare words (Zipf < 3) the chapter repeats: the names it writes ("ASTA", "HAGE")."""
+    from komyst.review import region_taxonomy
+
+    seen = {}
+    for source in sources or ():
+        for token in set(re.findall(r"[A-Za-z]{3,}", str(source or "").upper())):
+            if region_taxonomy.word_zipf(token) < 3.0:
+                seen[token] = seen.get(token, 0) + 1
+    return [token for token, count in seen.items() if count >= minimum]
 
 
 def align_name_articles(target, genders):
