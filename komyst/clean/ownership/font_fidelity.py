@@ -849,6 +849,17 @@ def _text_bands(ink: np.ndarray) -> int:
     return bands
 
 
+@functools.lru_cache(maxsize=256)
+def _caps_only(path: str) -> bool:
+    """A face whose lowercase letters are its capitals (it cannot letter mixed-case text)."""
+    try:
+        font = ImageFont.truetype(path, 48)
+    except Exception:  # noqa: BLE001
+        return False
+    return all(np.array_equal(render_text_raster(low, font), render_text_raster(low.upper(), font))
+               for low in "aeg")
+
+
 def match_font_by_raster(source_masks, candidates, *, draw_text: str = "") -> dict[str, Any] | None:
     """Rank candidate faces by how closely they reproduce the source lettering.
 
@@ -858,7 +869,10 @@ def match_font_by_raster(source_masks, candidates, *, draw_text: str = "") -> di
     if not source_masks:
         return None
     scored = []
+    mixed_case = any(ch.islower() for ch in draw_text)
     for path in candidates:
+        if mixed_case and _caps_only(path):
+            continue
         if draw_text:
             try:
                 if _glyph_support(ImageFont.truetype(path, 24), draw_text)["status"] != "complete":

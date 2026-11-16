@@ -720,6 +720,7 @@ def _analyze_image_array(original_bgr, raw_lines, page_index=None):
         items=len(raw_lines or []),
     ):
         candidates = [_candidate_from_line(line, original.shape) for line in raw_lines]
+    _keep_short_words_stacked_on_text(candidates)
     usable_lines = [candidate.line for candidate in candidates if not candidate.ignored]
     for candidate in candidates:
         if candidate.ignored:
@@ -1531,6 +1532,9 @@ def _restore_shape(token, letters):
 _ENGLISH_CONTRACTION_TAILS = frozenset({"S", "T", "LL", "RE", "VE", "D", "M", "EM", "CAUSE", "N"})
 # Tails of contractions that attach to a whole word; negations ("N'T") are left alone.
 _GLUED_HEAD_CONTRACTION_TAILS = frozenset({"S", "LL", "RE", "VE", "D", "M"})
+_PLACE_NOUN_AFTER = re.compile(
+    r"\s+(?:VILLAGE|TOWN|CITY|KINGDOM|EMPIRE|CASTLE|MOUNTAINS?|FOREST|RIVER|ISLAND|ACADEMY|SQUAD)\b",
+    re.IGNORECASE)
 
 
 def _split_before_hyphen_name(token, run, hyphen_names):
@@ -1568,6 +1572,17 @@ def chapter_hyphenated_names(texts):
         if n >= 2 and not all(region_taxonomy.is_english_word(part) for part in name.split("-")))
 
 
+_SHATTERED_WORD = re.compile(r"\b[A-Z]{1,2}(?: [A-Z]{1,2}){2,}\b")
+
+
+def _join_shattered_word(match):
+    joined = match.group(0).replace(" ", "")
+    # A stutter ("I I I") is speech, not a scattered word.
+    if len(set(match.group(0).split())) > 1 and region_taxonomy.is_english_word(joined) and region_taxonomy.word_zipf(joined) >= 4.0:
+        return joined
+    return match.group(0)
+
+
 def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words=frozenset()):
     """``text`` with OCR-damaged tokens repaired before translation.
 
@@ -1580,7 +1595,10 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
       "COLLDN'T" -> COULDN'T (``_misread_correction``).
 
     A real word, a protected name, and anything ambiguous are left as they are.
+    A wide shout the detector cut into scraps ("A WE SO ME!") is joined first when the
+    scraps spell one frequent word.
     """
+    text = _SHATTERED_WORD.sub(_join_shattered_word, str(text or ""))
     protected_keys = {_name_token_of(name) for name in protected or ()}
     names = sorted({key for key in (_name_token_of(name) for name in chapter_names or ())
                     if len(key) >= 3}, key=len, reverse=True)
@@ -1595,6 +1613,17 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
         if (len(key) < 4 or key in protected_keys or key in names or region_taxonomy.is_english_word(key)
                 or region_taxonomy.word_zipf(key) >= 3.0):
             return token
+        # A word naming a place ("RAYAKA VILLAGE") is that place's name, not glued words.
+        if _PLACE_NOUN_AFTER.match(match.string[match.end():]):
+            return token
+        head, apostrophe, tail = (re.split(r"(['’])", token, maxsplit=1) + ["", ""])[:3]
+        if apostrophe and tail.upper() not in _ENGLISH_CONTRACTION_TAILS:
+            # A contraction glued to the next word: "I'MFROM" -> I'M FROM.
+            for size in (2, 1):
+                ending, rest = tail[:size], tail[size:]
+                if (ending.upper() in _GLUED_HEAD_CONTRACTION_TAILS and len(rest) >= 2
+                        and region_taxonomy.is_english_word(rest.upper())):
+                    return f"{head}{apostrophe}{ending} {rest}"
         run = re.match(r"(?:-[A-Za-z]+)+", match.string[match.end():])
         if token.isalpha() and run:
             split = _split_before_hyphen_name(token, run.group(0), hyphen_names)
@@ -1635,6 +1664,16 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
         return (_restore_shape(token, corrected) or token) if corrected else token
 
     return re.sub(r"[A-Za-z][A-Za-z'’]*[A-Za-z]|[A-Za-z]", repair, str(text or ""))
+
+
+def chapter_recurring_tokens(texts, minimum=2):
+    """Non-dictionary words the chapter writes in several regions: names ("HAGE"), not misreads."""
+    seen = {}
+    for text in texts or ():
+        for token in set(re.findall(r"[A-Za-z]{4,}", str(text or "").upper())):
+            if not region_taxonomy.is_english_word(token) and region_taxonomy.word_zipf(token) < 3.0:
+                seen[token] = seen.get(token, 0) + 1
+    return [token for token, count in seen.items() if count >= minimum]
 
 
 def chapter_source_words(texts):
@@ -4087,6 +4126,30 @@ def get_font(font_path, size, role="regular", *, prefer_role=False, text=""):
     except Exception:
         pass
     return font
+
+
+def _keep_short_words_stacked_on_text(candidates):
+    """A common two-letter word ("Up") is noise alone, but not stacked right on a kept line.
+
+    "Up / until now.." lost its first word to the short-text noise rule before grouping.
+    The word must be frequent English, read with fair confidence, and sit directly above or
+    below a usable line of similar letter height that it overlaps horizontally.
+    """
+    kept = [c.line for c in candidates if not c.ignored]
+    for candidate in candidates:
+        line = candidate.line
+        word = re.sub(r"[^A-Za-z]", "", str(line.text or "")).upper()
+        if (candidate.ignore_reason != "noise_like_text" or len(word) != 2
+                or float(line.confidence or 0.0) < 0.6 or region_taxonomy.word_zipf(word) < 5.0):
+            continue
+        x, y, w, h = line.box
+        for other in kept:
+            ox, oy, ow, oh = other.box
+            gap = max(oy - (y + h), y - (oy + oh))
+            if (min(x + w, ox + ow) > max(x, ox) and gap <= 1.2 * max(h, oh)
+                    and 0.6 <= h / max(1, oh) <= 1.6):
+                candidate.ignored, candidate.ignore_reason = False, ""
+                break
 
 
 def _candidate_from_line(line, image_shape):
@@ -18672,6 +18735,12 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
                 profile=typography_profile,
                 target_line_count=len(group.lines) if line_scales else None,
             )
+            # The char-count estimate (and a forced source line count) can leave a line wider
+            # than the area, which then only shrinks the font (a 12-letter word in a narrow
+            # column fell to ~40 % of the source size). Wrap by real pixel width instead.
+            if any(draw.textlength(ln, font=font) > wrap_width for ln in lines):
+                lines = _wrap_text(draw, text, font, max_width=max(12, wrap_width),
+                                   split_long_words=font_size <= min_font)
         else:
             lines = (
                 _wrap_text(
@@ -20513,6 +20582,27 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
             if int(ring.sum()) and float(ring_white.sum()) / float(ring.sum()) >= 0.75:
                 stroke_color = tuple(int(v) for v in np.median(roi[ring_white], axis=0))
                 dominant_bgr = np.median(roi[dark_core > 0], axis=0)
+                color_family = "black"
+                stroke_present = True
+                stroke_confidence = max(stroke_confidence, 0.6)
+    elif fill_ink and color_family == "white" and bg_gray <= 90:
+        # On a dark panel the dark fill matches the page, so it never enters ``glyph_mask``:
+        # dark ink enclosed by the white footprint is the fill when it is shaped like strokes.
+        # The counters of plain white lettering are compact blobs (elongation ~1) or a tiny share.
+        white = ((val >= 185) & (sat <= 75)).astype(np.uint8)
+        _n, outside = cv2.connectedComponents(1 - white, connectivity=4)
+        edge = np.unique(np.concatenate([outside[0], outside[-1], outside[:, 0], outside[:, -1]]))
+        enclosed = ((white == 0) & ~np.isin(outside, edge) & (val <= 70)).astype(np.uint8)
+        enclosed_px = int(enclosed.sum())
+        if enclosed_px >= 60 and enclosed_px >= 0.25 * int(white.sum()):
+            count, labels, stats, _c = cv2.connectedComponentsWithStats(enclosed, connectivity=8)
+            dist = cv2.distanceTransform(enclosed, cv2.DIST_L2, 3)
+            areas = [int(stats[i, cv2.CC_STAT_AREA]) for i in range(1, count)]
+            elongation = [a / max(1.0, (2.0 * float(dist[labels == i].max())) ** 2)
+                          for i, a in zip(range(1, count), areas)]
+            if sum(areas) and float(np.average(elongation, weights=areas)) >= 4.0:
+                stroke_color = tuple(int(v) for v in np.median(roi[white > 0], axis=0))
+                dominant_bgr = np.median(roi[enclosed > 0], axis=0)
                 color_family = "black"
                 stroke_present = True
                 stroke_confidence = max(stroke_confidence, 0.6)

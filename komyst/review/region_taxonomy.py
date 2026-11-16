@@ -442,12 +442,18 @@ def _piece_zipf(piece: str) -> float | None:
     return 6.0 if piece in _STORY_CLAUSE_MARKERS else _LEXICON_ONLY_ZIPF
 
 
+_OBJECT_PRONOUNS = frozenset({"IT", "ME", "US", "UP"})
+
+
 def _misread_tail(split: list[str]) -> bool:
     """A split ending in a tiny word that is really one misread letter of a longer
     one: "SUMMON OR" for SUMMONOR, i.e. SUMMONER with the E read as O."""
     if len(split) < 2 or len(split[-1]) > 2:
         return False
     head, tail = "".join(split[:-1]), split[-1]
+    # An object pronoun after an everyday verb is the phrase itself: "CUT IT", not CUTIE.
+    if tail in _OBJECT_PRONOUNS and len(split) == 2 and _frequencies().get(head, 0.0) >= 5.0:
+        return False
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     for index in range(len(tail)):
         for char in alphabet:

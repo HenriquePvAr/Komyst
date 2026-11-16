@@ -68,6 +68,7 @@ from komyst.ocr.ocr_balloon import (
     propagate_chapter_declared_names,
     split_glued_source_words,
     chapter_hyphenated_names,
+    chapter_recurring_tokens,
     chapter_source_words,
     recover_protected_term_boundaries,
     summarize_speech_container_reocr,
@@ -3843,7 +3844,8 @@ def run_benchmark(args):
         # The first pass and every retry then see the same source.
         chapter_words = chapter_source_words(group.text for group in translation_targets)
         glue_names = [*detected_names, *chapter_hyphenated_names(
-            group.text for group in all_analyzed_groups)]
+            group.text for group in all_analyzed_groups),
+            *chapter_recurring_tokens(group.text for group in all_analyzed_groups)]
         for i in remote_index:
             group = translation_targets[i]
             source = str(getattr(group, "canonical_source_text", "") or group.text)
