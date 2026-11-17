@@ -9,6 +9,8 @@ vertical balloons, the English reference chapters), RapidOCR 3 with ONNX Runtime
   Chinese    highest confidence; it also reads Chinese.
 * English  - PP-OCRv6 tiny: 28-36 % faster than the bundled PP-OCRv4 on the reference chapters,
              with real word spaces (``OCR_ENGLISH_PROFILE=bundled`` keeps the old model).
+* Spanish  - PP-OCRv6 tiny: reads the accents and ¿ ¡ (97 on a WEBTOON chapter; the bundled
+             model read none), 31 % faster.
 
 A language without a profile, or whose model files are missing, keeps the bundled engine.
 """
@@ -28,6 +30,7 @@ _LANG_ALIASES = {
     "2": "ko", "ko": "ko", "kor": "ko", "korean": "ko", "coreano": "ko",
     "zh": "zh", "ch": "zh", "chinese": "zh", "chines": "zh",
     "3": "en", "en": "en", "eng": "en", "ingles": "en",
+    "es": "es", "spa": "es", "spanish": "es", "espanhol": "es", "latin": "es",
 }
 
 
@@ -71,7 +74,7 @@ def _profile(lang: str, english_profile: str) -> Profile | None:
     if lang in {"ja", "zh"}:
         return Profile("ppocrv6_manga", "ppocrv6_manga",
                        ("det/manga_det.onnx", "rec/manga_rec.onnx", "ppocrv6_dict.txt"), {})
-    if lang == "en" and english_profile == "ppocrv6_tiny":
+    if lang == "es" or (lang == "en" and english_profile == "ppocrv6_tiny"):
         return Profile("ppocrv6_tiny", "v6",
                        ("PP-OCRv6_det_tiny.onnx", "PP-OCRv6_rec_tiny.onnx"),
                        {"Det.ocr_version": OCRVersion("PP-OCRv6"), "Det.model_type": ModelType("tiny"),

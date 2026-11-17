@@ -1041,6 +1041,8 @@ tradutor.
 - Coreano → PP-OCRv5 mobile (det `ch`) + rec `korean`; japonês/chinês → PP-OCRv6 manga
   (det/rec + dicionário, `Det.thresh` 0.15 / `box_thresh` 0.25 / `unclip_ratio` 1.5); inglês →
   PP-OCRv6 tiny por padrão (`OCR_ENGLISH_PROFILE=ppocrv6_tiny`; `bundled` volta ao modelo antigo).
+  Espanhol (`es`/`latin`) → PP-OCRv6 tiny sempre: num capítulo WEBTOON ES leu 97 acentos/¿¡
+  (o modelo empacotado leu 0), 31 % mais rápido.
   Medido nas páginas de referência: 28–36 % mais rápido que o modelo empacotado, com espaços
   entre palavras.
 - Modelos em `ocr_models.models_dir()/rapidocr/<pasta>` (`v5_mobile`, `ppocrv6_manga`, `v6`).
@@ -1065,7 +1067,7 @@ tradutor.
 
 **Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (o provider
 recebe a fala sem contexto); texto escuro com contorno branco sobre arte pode ficar com
-resíduo, e a validação de remoção o reporta como removido; russo e espanhol usam o modelo
+resíduo, e a validação de remoção o reporta como removido; russo usa o modelo
 empacotado; o catálogo `ocr_models.ensure_model` continua sem chamador de produção.
 
 ## 15. Tradução: abstração de provider

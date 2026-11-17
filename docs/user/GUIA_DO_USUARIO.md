@@ -268,7 +268,7 @@ capítulo.
 > modelo estão instalados nesta máquina: o texto vertical do japonês é lido da direita para a
 > esquerda, e a tradução é escrita na horizontal, dentro do balão. Ainda podem sair errados: nomes
 > próprios traduzidos ao pé da letra e texto com contorno branco desenhado sobre a arte (pode ficar
-> parte do texto original). **Russo** e **espanhol** ainda usam o modelo padrão.
+> parte do texto original). O **espanhol** usa o mesmo modelo do inglês, que lê acentos e ¿ ¡. O **russo** ainda usa o modelo padrão.
 
 | Modo | Quando usar |
 | --- | --- |

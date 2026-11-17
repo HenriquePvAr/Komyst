@@ -23,6 +23,11 @@ def test_language_choices_map_to_profiles_and_missing_models_keep_the_bundled_en
         (folder / name).write_bytes(b"x")
     assert rp.profile_for("ko").name == "ppocrv5_mobile_korean"
     assert rp.profile_for("3") is None  # English stays bundled unless its profile is chosen
+    tiny = tmp_path / "v6"
+    tiny.mkdir()
+    for name in ("PP-OCRv6_det_tiny.onnx", "PP-OCRv6_rec_tiny.onnx"):
+        (tiny / name).write_bytes(b"x")
+    assert rp.profile_for("es").name == "ppocrv6_tiny"  # Spanish accents need PP-OCRv6
 
 
 def test_hangul_lines_are_not_noise_but_vowelless_latin_still_is():
