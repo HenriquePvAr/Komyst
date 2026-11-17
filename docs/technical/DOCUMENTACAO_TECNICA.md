@@ -1053,6 +1053,12 @@ tradutor.
   teto `MAX_FONT_SIZE` sobe até esse tamanho.
 - `_deduplicate_tiled_ocr_lines` descarta leituras ≥ 80 % cobertas por uma leitura mais longa
   (fragmentos cortados entre tiles).
+- `clean_ocr_text` troca o glifo `0` por `O` em tokens ASCII com pelo menos duas letras e
+  sem outros dígitos; identificadores com outros números permanecem intactos. Essa
+  normalização não usa nomes ou palavras específicas.
+- Títulos tipográficos com múltiplas palavras distintas sobre arte saturada podem sair da
+  classe decorativa quando a confiança OCR é pelo menos 0,93 e a pontuação de texto
+  principal é pelo menos 0,30. Efeitos repetidos e leituras incertas continuam preservados.
 
 **Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (o provider
 recebe a fala sem contexto); texto escuro com contorno branco sobre arte pode ficar com

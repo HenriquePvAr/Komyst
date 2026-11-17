@@ -6034,7 +6034,7 @@ def _decorative_short_display_story_promotion_allowed(group):
         main_score = float(getattr(group, "main_text_score", 0.0) or 0.0)
     except (TypeError, ValueError):
         main_score = 0.0
-    if main_score < (0.20 if confidence >= 0.95 else 0.35):
+    if main_score < (0.20 if confidence >= 0.95 else 0.30):
         return False
     folded_words = [
         re.sub(r"[^A-Z']", "", _ascii_fold(word).upper())
@@ -6080,13 +6080,12 @@ def _decorative_short_display_story_promotion_allowed(group):
         _metric("context_saturation_mean") >= 55.0
         or _metric("saturation_mean") >= 55.0
     )
-    # A named move or title ("DAEMON LASERBLAST") set in typeset capitals over bright art is
-    # not dark, but it is read with near-certainty, is made of several distinct words and
-    # includes real vocabulary: that is a caption to translate, not a one-word effect or a
-    # repeated "BOOM BOOM" burst, which stay preserved.
+    # A title set in typeset capitals over saturated art can be translatable
+    # display text when several distinct, recognisable words are read clearly.
+    # A one-word effect or repeated sound remains preserved.
     distinct = len(set(semantic_words)) == len(semantic_words)
     real_words = sum(1 for word in semantic_words if region_taxonomy.is_english_word(word))
-    typeset_caption = bool(confidence >= 0.95 and distinct and real_words >= 1
+    typeset_caption = bool(confidence >= 0.93 and distinct and real_words >= 1
                            and len(semantic_words) >= 2)
     return (dark_context or clause or typeset_caption) and saturated_context
 
@@ -17866,6 +17865,22 @@ def _measured_halo_mask(source_bgr, mask_u8, max_px=8, tol=30):
     over real art: the single biggest error source). Growth is capped at ``max_px`` and
     cut to 4 px when the colour never ends (it is the backdrop, not a halo).
     """
+    ys, xs = np.nonzero(mask_u8)
+    if not len(xs):
+        return mask_u8
+    # All reads and writes below are within max_px plus the final 3x3 close
+    # and dilate. Restrict the expensive distance transform, colour comparison
+    # and component labelling to that context instead of a multi-megapixel page.
+    pad = max_px + 3
+    y0, y1 = max(0, int(ys.min()) - pad), min(mask_u8.shape[0], int(ys.max()) + pad + 1)
+    x0, x1 = max(0, int(xs.min()) - pad), min(mask_u8.shape[1], int(xs.max()) + pad + 1)
+    local = _measured_halo_mask_local(source_bgr[y0:y1, x0:x1], mask_u8[y0:y1, x0:x1], max_px, tol)
+    result = mask_u8.copy()
+    result[y0:y1, x0:x1] = local
+    return result
+
+
+def _measured_halo_mask_local(source_bgr, mask_u8, max_px, tol):
     inside = mask_u8 > 0
     dist = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 3)
     sample = (dist > 2) & (dist <= 4)
@@ -17882,7 +17897,7 @@ def _measured_halo_mask(source_bgr, mask_u8, max_px=8, tol=30):
     # backdrop itself, so only a short reach is safe.
     cap = (dist > max_px - 1.5) & (dist <= max_px)
     if max_px > 4 and np.count_nonzero(cap) and float(np.mean(halo[cap])) > 0.3:
-        return _measured_halo_mask(source_bgr, mask_u8, max_px=4, tol=tol)
+        return _measured_halo_mask_local(source_bgr, mask_u8, max_px=4, tol=tol)
     grown = cv2.morphologyEx(halo.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     grown = cv2.dilate(grown, np.ones((3, 3), np.uint8))  # the blurred outer edge
     grown[dist > max_px + 1] = 0

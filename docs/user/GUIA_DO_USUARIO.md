@@ -179,6 +179,7 @@ em coreano), **MangaDex** (https://mangadex.org/, vários idiomas), **Tapas** (h
 e **INKR** (https://comics.inkr.com/). Só capítulos gratuitos são baixados: um capítulo pago,
 bloqueado ou com login não é aceito. Quando um site recusa a captura automática da página
 inicial, o cartão mostra "Prévia indisponível" — o atalho e o download continuam funcionando.
+Os cards se organizam conforme a largura da janela, com até quatro por linha em telas largas.
 Ao clicar em "Abrir …", o site abre no seu
 **navegador padrão** quando você usa a janela do aplicativo, ou numa **nova aba** quando usa
 o Komyst pelo navegador (o Komyst continua aberto). Lá você encontra o capítulo, **copia a URL**

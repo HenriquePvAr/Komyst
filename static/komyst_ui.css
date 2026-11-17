@@ -3609,7 +3609,7 @@ html[data-visual-reduced-motion="1"] .auth-login-shell[data-entered] .auth-login
 
 /* Fontes (supported sources hub) — external shortcut cards */
 .sources-help { margin: 0 0 18px; opacity: .8; font-size: 14px; line-height: 1.5; }
-.sources-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.sources-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .source-card { display: flex; flex-direction: column; gap: 10px; }
 .source-card{overflow:hidden; border-radius:12px; background:#151517;}
 .source-preview{aspect-ratio:16/9; margin:-24px -24px 0; background-color:#242428; background-size:cover; background-position:top center; border-bottom:1px solid var(--line);}
@@ -3621,6 +3621,8 @@ html[data-visual-reduced-motion="1"] .auth-login-shell[data-entered] .auth-login
 .source-badge { flex: none; font-size: 11px; letter-spacing: .02em; padding: 3px 9px; border-radius: 999px;
   color: var(--tab-accent, #2f8f5f); background: rgba(var(--tab-rgb, 47,143,95), .12); }
 .source-open { align-self: flex-start; }
+@media (max-width: 1200px) { .sources-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 850px) { .sources-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .sources-grid { grid-template-columns: 1fr; } }
 
 /* Mission 12: concise, accessible terminal result, independent of pipeline logs. */

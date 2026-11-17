@@ -909,6 +909,15 @@ def clean_ocr_text(text):
     text = (text or "").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\s*\n\s*", " ", text)
+    # A zero surrounded by letters in an otherwise alphabetic token is an OCR
+    # glyph confusion. Keep mixed identifiers containing other digits intact.
+    text = re.sub(
+        r"\b[A-Za-z0]+\b",
+        lambda match: match.group(0).replace("0", "O")
+        if "0" in match.group(0) and sum(ch.isalpha() for ch in match.group(0)) >= 2
+        else match.group(0),
+        text,
+    )
     return _normalize_censor_glyphs(_join_line_break_hyphens(text.strip()))
 
 

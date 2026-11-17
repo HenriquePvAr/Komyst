@@ -64,6 +64,17 @@ def test_no_halo_means_no_growth_beyond_the_fringe():
     assert reach[grown > 0].max() <= 5.5
 
 
+def test_local_halo_measurement_matches_full_page_result():
+    image = np.full((900, 1200, 3), 130, np.uint8)
+    mask = np.zeros(image.shape[:2], np.uint8)
+    cv2.putText(mask, "ABC", (430, 470), cv2.FONT_HERSHEY_DUPLEX, 2.0, 1, 4)
+    image[cv2.dilate(mask, np.ones((9, 9), np.uint8)) > 0] = 245
+    image[mask > 0] = 10
+    expected = ob._measured_halo_mask_local(image, mask, 8, 30)
+    actual = ob._measured_halo_mask(image, mask)
+    assert np.array_equal(actual, expected)
+
+
 def test_textured_art_leaves_no_halo_ghost_after_the_fill(monkeypatch):
     truth = _stripes()
     image, glyph, halo = _text_on(truth, halo=True)
