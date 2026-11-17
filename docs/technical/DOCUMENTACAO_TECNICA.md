@@ -10,6 +10,7 @@
 > verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `dev`/`main`.
 > §17, "Auditoria linguística e taxonomia semântica", item 5 (retry pelo backend) verificado sobre `885a237` (branch `dev`) em 2026-11-03.
 > **Última revisão:** 2026-11-17 (base verificada `98b52ff`; fontes novas e idioma de origem)
+> Correção local de paleta do lettering reverificada sobre `dev` (`203f622`) em 2026-11-17; validação física do novo render pendente.
 > **Público:** desenvolvedores, mantenedores e suporte técnico.
 
 Documentos irmãos: [Guia do Usuário](../user/GUIA_DO_USUARIO.md) ·
@@ -1682,6 +1683,9 @@ flowchart LR
 - Cor: a cor medida do original vence a paleta das classes estilizadas quando confiável e
   coerente com a família de cor; o contorno medido só acompanha um preenchimento aceito. Um
   "contorno" exige preenchimento com espessura interna (franja antialias não é fill).
+  Quando uma tinta neutra quase preta é medida com alta confiança sobre arte saturada,
+  ela também prevalece sobre a classe cromática inferida do fundo: preenchimento escuro,
+  sem contorno/brilho colorido inventado. A máscara de limpeza continua sendo validada à parte.
 - Hierarquia de tamanho entre linhas usa a altura da tinta (`_line_ink_height`), não a caixa OCR,
   com limiar 1,25.
 - Fontes empacotadas em `assets/fonts/` (`font_fidelity.BUNDLED_FONTS_DIR`, incluídas na spec do

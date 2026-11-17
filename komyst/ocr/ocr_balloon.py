@@ -21534,17 +21534,36 @@ def typography_profile_for_region(img_bgr, group, box, *, style=None):
     profile["source_text_color_confident"] = False
     source_bgr = lettering.get("dominant_bgr")
     source_conf = float(lettering.get("confidence") or 0.0)
-    # The curated stylized-display classes already carry an intentional, same-family
-    # fill/stroke/glow pair (a light-blue magical caption, a dark-red dramatic
-    # shout); the raw measured ink colour must not overwrite that art direction.
-    # Ordinary classes, which previously fell back to a generic dark preset, do
-    # adopt the measured colour.
+    # Stylized presets are fallbacks when the source ink is uncertain. They must
+    # not impose a colour or glow contradicted by a reliable source measurement.
     _stylized = str(profile.get("visual_class") or "") in {
         "dramatic_red_display", "mystic_blue_system", "ink_display",
     }
-    # Fidelity wins over the preset fill: a purple caption classified as the blue
-    # "system" family was drawn light blue. The preset keeps its glow/outline.
+    # Saturated art can make a plain black title look like a coloured display
+    # family. A strong neutral ink measurement takes precedence over that
+    # background-derived preset, including its invented outline and glow.
+    neutral_dark_ink = False
     if source_bgr and source_conf >= _SOURCE_COLOR_MIN_CONFIDENCE:
+        source_rgb = (int(source_bgr[2]), int(source_bgr[1]), int(source_bgr[0]))
+        source_luma = 0.299 * source_rgb[0] + 0.587 * source_rgb[1] + 0.114 * source_rgb[2]
+        neutral_dark_ink = bool(
+            max(source_rgb) <= 35
+            and max(source_rgb) - min(source_rgb) <= 25
+            and float(lettering.get("background_brightness") or 0.0) - source_luma >= 30
+            and float(lettering.get("glyph_occupancy") or 0.0) >= 0.08
+            and _stylized
+            and not lettering.get("measured_neutral_glow")
+        )
+        if neutral_dark_ink:
+            profile.update(
+                fill_color=source_rgb, stroke_color=source_rgb, stroke_width=0,
+                glow_color=None, glow_strength=0, shadow_color=None,
+                shadow_offset=(0, 0), plain_lettering=True,
+                source_text_color_confident=True,
+            )
+    # A reliable chromatic fill can also replace the preset fill. Its measured
+    # outline is considered independently below.
+    if source_bgr and source_conf >= _SOURCE_COLOR_MIN_CONFIDENCE and not neutral_dark_ink:
         source_rgb = (int(source_bgr[2]), int(source_bgr[1]), int(source_bgr[0]))
         bg_brightness = float(lettering.get("background_brightness") or 255.0)
         luminance = 0.299 * source_rgb[0] + 0.587 * source_rgb[1] + 0.114 * source_rgb[2]
@@ -21592,6 +21611,7 @@ def typography_profile_for_region(img_bgr, group, box, *, style=None):
         and stroke_bgr
         and not stroke_is_blend
         and float(lettering.get("stroke_confidence") or 0.0) >= 0.55
+        and not neutral_dark_ink
         and (profile["source_text_color_confident"] or not _stylized)
     ):
         profile["stroke_color"] = (int(stroke_bgr[2]), int(stroke_bgr[1]), int(stroke_bgr[0]))

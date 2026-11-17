@@ -1,6 +1,7 @@
 # Komyst — Guia do Usuário
 
 > **Base verificada:** `2d8a929` · **Revisado em:** 2026-11-17 · Idioma original reverificado sobre `dev` (`885a237`) em 2026-11-03; glossário de nomes verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `main`
+> Cor do lettering reverificada localmente sobre `dev` (`203f622`) em 2026-11-17; confirmação em job completo pendente.
 > **Para quem é:** Scans, tradutores, editores e testadores da Beta. Nenhum conhecimento
 > técnico é necessário.
 
@@ -55,6 +56,8 @@ O Komyst coordena a leitura e salva os outputs no seu computador. A tradução u
 configurado pela conta; autenticação, autorização e a contabilização da execução também usam o
 backend do produto. Os artefatos locais só são publicados na Comunidade se você escolher essa
 ação explicitamente.
+Quando a cor do lettering original é medida com confiança, o redesenho usa essa cor; áreas
+com resíduos de texto ou reconstrução incerta continuam sujeitas à revisão de qualidade.
 
 > 💡 O programa foi feito para ser honesto. Quando ele não tem certeza de alguma coisa, ele
 > avisa em vez de inventar.

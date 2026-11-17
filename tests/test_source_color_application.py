@@ -73,6 +73,19 @@ class SourceColourApplied(unittest.TestCase):
         self.assertTrue(p["source_text_color_confident"])
         self.assertLessEqual(_dist(p["fill_color"], (20, 20, 20)), 40)
 
+    def test_dark_display_ink_over_saturated_art_does_not_invent_blue_glow(self):
+        img = _canvas(bg=(115, 25, 90), size=(500, 800))
+        _draw(img, "SILVER WINGS", fill_bgr=(8, 4, 12), org=(30, 230),
+              scale=2.3, thick=5)
+        box = (20, 145, 740, 130)
+        group = _group("SILVER WINGS", box, "unknown")
+        group.translation = "ASAS PRATEADAS"
+        p = ob.typography_profile_for_region(img, group, box)
+        self.assertTrue(p["source_text_color_confident"])
+        self.assertLessEqual(max(p["fill_color"]), 35)
+        self.assertEqual(p["stroke_width"], 0)
+        self.assertIsNone(p["glow_color"])
+
     def test_same_colour_different_shape_can_pick_different_font(self):
         # Both black; only the glyph shape differs -> role may differ (decoupling).
         r1, _ = ob.select_font_role_with_glyph_style(
