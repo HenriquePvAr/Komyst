@@ -10,7 +10,7 @@
 > verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `dev`/`main`.
 > §17, "Auditoria linguística e taxonomia semântica", item 5 (retry pelo backend) verificado sobre `885a237` (branch `dev`) em 2026-11-03.
 > **Última revisão:** 2026-11-17 (base verificada `98b52ff`; fontes novas e idioma de origem)
-> Correção local de paleta do lettering reverificada sobre `dev` (`203f622`) em 2026-11-17; validação física do novo render pendente.
+> Paleta do lettering reverificada sobre `dev` (`579d842`) e em job REF-A de 65 páginas em 2026-11-17: título antes azul passou a preto. A limpeza ainda deixa letras originais visíveis; gate em revisão.
 > **Público:** desenvolvedores, mantenedores e suporte técnico.
 
 Documentos irmãos: [Guia do Usuário](../user/GUIA_DO_USUARIO.md) ·

@@ -1,7 +1,7 @@
 # Komyst — Guia do Usuário
 
 > **Base verificada:** `2d8a929` · **Revisado em:** 2026-11-17 · Idioma original reverificado sobre `dev` (`885a237`) em 2026-11-03; glossário de nomes verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `main`
-> Cor do lettering reverificada localmente sobre `dev` (`203f622`) em 2026-11-17; confirmação em job completo pendente.
+> Cor do lettering reverificada sobre `dev` (`579d842`) em job REF-A de 65 páginas em 2026-11-17; resíduos do título original continuam em revisão.
 > **Para quem é:** Scans, tradutores, editores e testadores da Beta. Nenhum conhecimento
 > técnico é necessário.
 
