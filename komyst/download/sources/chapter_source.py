@@ -711,6 +711,294 @@ class WebtoonsAdapter(BaseAdapter):
 WEBTOONS = WebtoonsAdapter()
 
 
+class NaverWebtoonAdapter(BaseAdapter):
+    """Naver Webtoon (Korean): free episodes served as plain images in the server HTML."""
+
+    def __init__(self):
+        super().__init__(
+            name="naver_webtoon",
+            adapter_version="1",
+            allowed_hosts=("comic.naver.com",),
+            resource_hosts=("image-comic.pstatic.net",),
+            runner="run_webtoon.py",
+            chapter_path_markers=("/webtoon/detail",),
+            coverage_strategy="reader_container",
+            collection_strategy="adapter_specific",
+            page_layout="strip",
+            container_selector="div.wt_viewer, #sectionContWide",
+            # Only the episode's own images: the viewer also holds the age-rating banner.
+            image_selector="div.wt_viewer img[id^='content_image_']",
+        )
+
+
+NAVER_WEBTOON = NaverWebtoonAdapter()
+
+
+_MANGADEX_CHAPTER = re.compile(r"/chapter/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+MANGADEX_API = "https://api.mangadex.org"
+MANGADEX_USER_AGENT = "Komyst/1.0 (chapter downloader)"
+
+
+class MangaDexAdapter(BaseAdapter):
+    """MangaDex chapters through its public API (``/at-home/server/{chapter}``).
+
+    The reader page is a script shell, so the page list comes from the documented API: one
+    call for the at-home node, image URLs ``{baseUrl}/data/{hash}/{file}``. Every URL is
+    held to this adapter's hosts like any other source. The API asks for an identifying
+    User-Agent and at most ~5 requests/s; a chapter costs two API calls.
+    """
+
+    def __init__(self):
+        super().__init__(
+            name="mangadex",
+            adapter_version="1",
+            allowed_hosts=("mangadex.org",),
+            resource_hosts=("mangadex.network", "mangadex.org"),
+            runner="run_webtoon.py",
+            chapter_path_markers=("/chapter/",),
+            coverage_strategy="reader_container",
+            collection_strategy="adapter_specific",
+            container_selector="",
+            image_selector="img",
+        )
+
+    @staticmethod
+    def chapter_id(url: str) -> str:
+        match = _MANGADEX_CHAPTER.search(urlparse(str(url or "")).path)
+        return match.group(1) if match else ""
+
+    def validate_path(self, url: str) -> None:
+        if not self.chapter_id(url):
+            raise SourceError(UNSUPPORTED_SOURCE, "not_a_chapter_url")
+
+    def _api_json(self, session: Any, url: str) -> dict[str, Any]:
+        from komyst.download.pinned_requests import pinned_request
+
+        self.validate_url(url)
+        with pinned_request(session, url):
+            response = session.get(url, headers={"User-Agent": MANGADEX_USER_AGENT,
+                                                 "Accept": "application/json"},
+                                   timeout=(10.0, 20.0), allow_redirects=False)
+        response.raise_for_status()
+        return response.json()
+
+    def collect_dom_candidates_from_html(self, html: str, page_url: str
+                                          ) -> list[dict[str, Any]] | None:
+        """The page list from the API; ``None`` (browser fallback) on any failure."""
+        chapter = self.chapter_id(page_url)
+        if not chapter:
+            return None
+        import requests
+
+        from komyst.download.pinned_requests import install_pinned_requests
+
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            install_pinned_requests(session)
+            server = self._api_json(session, f"{MANGADEX_API}/at-home/server/{chapter}")
+        except Exception:  # noqa: BLE001 - any API failure falls back to the browser path
+            return None
+        finally:
+            session.close()
+        base = str(server.get("baseUrl") or "").rstrip("/")
+        data = server.get("chapter") or {}
+        digest, files = str(data.get("hash") or ""), list(data.get("data") or [])
+        if not base or not re.fullmatch(r"[0-9a-f]+", digest) or not files:
+            return None
+        candidates = []
+        for order, name in enumerate(files):
+            url = f"{base}/data/{digest}/{name}"
+            try:
+                self.validate_url(url)
+            except Exception:  # noqa: BLE001 - a node outside the allowlist is refused
+                return None
+            candidates.append({
+                "url": url, "source": "mangadex_at_home", "order": order, "y": order,
+                "width": 0, "height": 0, "naturalWidth": 0, "naturalHeight": 0,
+                "container": "mangadex:at-home", "className": "", "id": "", "alt": "",
+                "context": "reader", "origin": "dom", "visible": True,
+            })
+        return candidates
+
+    def score_cluster(self, cluster: Any) -> float | None:
+        """The page list the API returns is the chapter, in order: no layout guessing."""
+        values = getattr(cluster, "candidates", cluster)
+        values = values if isinstance(values, (list, tuple)) else ()
+        sources = {str(getattr(item, "source", None) or (item.get("source") if isinstance(item, dict) else ""))
+                   for item in values}
+        return 0.97 if values and sources == {"mangadex_at_home"} else None
+
+
+MANGADEX = MangaDexAdapter()
+
+
+_IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_ATTR = re.compile(r'([\w:-]+)\s*=\s*("([^"]*)"|\'([^\']*)\')')
+
+
+def _static_reader_images(html: str, *, class_token: str, source: str) -> list[dict[str, Any]]:
+    """Reader pages a server-rendered viewer lists as ``<img class="... token ...">``.
+
+    The real address is the lazy ``data-src`` when present (``src`` is a placeholder).
+    """
+    candidates: list[dict[str, Any]] = []
+    for tag in _IMG_TAG.findall(str(html or "")):
+        attrs = {m.group(1).lower(): _html.unescape(m.group(3) if m.group(3) is not None else m.group(4))
+                 for m in _ATTR.finditer(tag)}
+        if class_token not in str(attrs.get("class") or "").split():
+            continue
+        url = str(attrs.get("data-src") or attrs.get("src") or "").strip()
+        if not url.startswith("https://"):
+            continue
+        order = len(candidates)
+        candidates.append({
+            "url": url, "source": source, "order": order, "y": order,
+            "width": _safe_html_int(attrs.get("width")), "height": _safe_html_int(attrs.get("height")),
+            "naturalWidth": _safe_html_int(attrs.get("width")),
+            "naturalHeight": _safe_html_int(attrs.get("height")),
+            "container": class_token, "className": str(attrs.get("class") or ""), "id": "",
+            "alt": "", "context": "reader", "origin": "dom", "visible": True,
+        })
+    return candidates
+
+
+class _OwnListAdapter(BaseAdapter):
+    """A reader whose own page list (server HTML or API) is the chapter: scored as such."""
+
+    list_source = ""
+
+    def score_cluster(self, cluster: Any) -> float | None:
+        values = getattr(cluster, "candidates", cluster)
+        values = values if isinstance(values, (list, tuple)) else ()
+        sources = {str(getattr(item, "source", None) or (item.get("source") if isinstance(item, dict) else ""))
+                   for item in values}
+        return 0.97 if values and sources == {self.list_source} else None
+
+
+class TapasAdapter(_OwnListAdapter):
+    """Tapas: free episodes list their pages as ``img.content__img`` in the server HTML.
+
+    The image URLs carry a signed, expiring token, so they are used in the same run.
+    """
+
+    list_source = "tapas_episode_html"
+
+    def __init__(self):
+        super().__init__(
+            name="tapas",
+            adapter_version="1",
+            allowed_hosts=("tapas.io",),
+            resource_hosts=("tapas.io",),
+            runner="run_webtoon.py",
+            chapter_path_markers=("/episode/",),
+            coverage_strategy="reader_container",
+            collection_strategy="adapter_specific",
+            page_layout="strip",
+            container_selector=".js-episode-article, .viewer",
+            image_selector="img.content__img",
+        )
+
+    def validate_path(self, url: str) -> None:
+        if not re.fullmatch(r"/episode/\d+/?", urlparse(str(url or "")).path):
+            raise SourceError(UNSUPPORTED_SOURCE, "not_a_chapter_url")
+
+    def collect_dom_candidates_from_html(self, html: str, page_url: str
+                                          ) -> list[dict[str, Any]] | None:
+        return _static_reader_images(html, class_token="content__img", source=self.list_source) or None
+
+
+TAPAS = TapasAdapter()
+
+
+_INKR_CHAPTER = re.compile(r"^/title/[\w-]+/chapter/(\d+)(?:-[\w-]*)?/?$")
+INKR_CONTENT_API = "https://icd-api.inkr.com/v1/content_json/batch?operation=autoFetchICD"
+
+
+class InkrAdapter(_OwnListAdapter):
+    """INKR: the reader's own content API lists the chapter's pages.
+
+    Only chapters the site gives away (no coin price) are taken; a paid chapter answers with
+    a few preview pages, which would ship a truncated chapter.
+    """
+
+    list_source = "inkr_content_api"
+
+    def __init__(self):
+        super().__init__(
+            name="inkr",
+            adapter_version="1",
+            allowed_hosts=("comics.inkr.com",),
+            resource_hosts=("inkr.com",),
+            runner="run_webtoon.py",
+            chapter_path_markers=("/chapter/",),
+            coverage_strategy="reader_container",
+            collection_strategy="adapter_specific",
+        )
+
+    def validate_path(self, url: str) -> None:
+        if not _INKR_CHAPTER.match(urlparse(str(url or "")).path):
+            raise SourceError(UNSUPPORTED_SOURCE, "not_a_chapter_url")
+
+    def collect_dom_candidates_from_html(self, html: str, page_url: str
+                                          ) -> list[dict[str, Any]] | None:
+        match = _INKR_CHAPTER.match(urlparse(str(page_url or "")).path)
+        if not match:
+            return None
+        import requests
+
+        from komyst.download.pinned_requests import install_pinned_requests, pinned_request
+
+        oid = f"ik-chapter-{match.group(1)}"
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            install_pinned_requests(session)
+            self.validate_url(INKR_CONTENT_API)
+            with pinned_request(session, INKR_CONTENT_API):
+                response = session.post(
+                    INKR_CONTENT_API,
+                    json=[{"oids": [oid], "fields": ["chapterPages", "revenueType", "coinPrice"]}],
+                    headers={"Origin": "https://comics.inkr.com", "Referer": "https://comics.inkr.com/",
+                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                    timeout=(10.0, 20.0), allow_redirects=False)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:  # noqa: BLE001 - any API failure falls back to the browser path
+            return None
+        finally:
+            session.close()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        chapter = (data or {}).get(oid) if isinstance(data, dict) else None
+        if not isinstance(chapter, dict):
+            return None
+        # Read for free (ad-supported or free) - a coin price is only the optional unlock.
+        free = (str(chapter.get("revenueType") or "").lower() in {"ad", "free"}
+                or float(chapter.get("coinPrice") or 0) <= 0)
+        if not free:
+            return None
+        candidates = []
+        for order, page in enumerate(chapter.get("chapterPages") or []):
+            base = str((page or {}).get("url") or "").rstrip("/")
+            if not base.startswith("https://"):
+                return None
+            url = f"{base}/p.jpg"
+            try:
+                self.validate_url(url)
+            except Exception:  # noqa: BLE001
+                return None
+            candidates.append({
+                "url": url, "source": self.list_source, "order": order, "y": order,
+                "width": 0, "height": 0, "naturalWidth": 0, "naturalHeight": 0,
+                "container": "inkr:content", "className": "", "id": "", "alt": "",
+                "context": "reader", "origin": "dom", "visible": True,
+            })
+        return candidates or None
+
+
+INKR = InkrAdapter()
+
+
 _COMIX_HOSTS = ("comix.to", "www.comix.to")
 _COMIX_CHAPTER_PATH = re.compile(
     r"^/title/[a-z0-9][a-z0-9-]*/[0-9]+-chapter-[a-z0-9][a-z0-9-]*/?$",
@@ -1307,7 +1595,7 @@ class UniversalChapterAdapter(BaseAdapter):
 VORTEXSCANS = VortexScansAdapter()
 # Specific adapters are ordered before the universal fallback.  Keep Comix isolated so
 # existing sources retain their exact routing and resource policies.
-ADAPTERS: tuple[BaseAdapter, ...] = (WEBTOONS, VORTEXSCANS, COMIX)
+ADAPTERS: tuple[BaseAdapter, ...] = (WEBTOONS, NAVER_WEBTOON, MANGADEX, TAPAS, INKR, VORTEXSCANS, COMIX)
 
 
 def select_adapter(url: str) -> BaseAdapter:

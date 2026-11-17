@@ -110,6 +110,9 @@ def get_translator(choice, *, translation_provider=None):
     # The desktop backend provider is injected by the job runner with its
     # job-scoped auth/runtime context.  Never construct a local provider here.
     if translation_provider is not None and hasattr(translation_provider, "translate_batch"):
+        if hasattr(translation_provider, "set_source_language"):
+            # The job's chosen source language, as the provider's ISO code (EN/JA/KO/ZH/RU/ES).
+            translation_provider.set_source_language(google_lang.upper())
         return translation_provider, ocr_code
 
     from komyst.ui.ui_helpers import DEFAULT_TRANSLATION_PROVIDER, normalize_translation_provider

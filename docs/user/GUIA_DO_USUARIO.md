@@ -1,6 +1,6 @@
 # Komyst — Guia do Usuário
 
-> **Base verificada:** `b758ccc` · **Revisado em:** 2026-11-13 · Idioma original reverificado sobre `dev` (`885a237`) em 2026-11-03; glossário de nomes verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `main`
+> **Base verificada:** `98b52ff` · **Revisado em:** 2026-11-17 · Idioma original reverificado sobre `dev` (`885a237`) em 2026-11-03; glossário de nomes verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `main`
 > **Para quem é:** Scans, tradutores, editores e testadores da Beta. Nenhum conhecimento
 > técnico é necessário.
 
@@ -155,7 +155,7 @@ Na lateral existe um menu com as áreas do programa:
 | --- | --- |
 | **Início** | Resumo: séries em andamento, atividade recente e atalhos rápidos |
 | **Nova tradução** | Onde você começa a tradução de um capítulo |
-| **Fontes** | Atalhos para Webtoon, Comix e Vortex Scans. Também é possível escolher uma pasta local na tela Nova tradução. |
+| **Fontes** | Atalhos para Webtoon, Comix, Vortex Scans, Naver Webtoon, MangaDex, Tapas e INKR. Também é possível escolher uma pasta local na tela Nova tradução. |
 | **Fila** | Vários capítulos enfileirados para processar em sequência |
 | **Capítulos traduzidos** | Sua biblioteca local: ler, abrir pasta e ver relatórios |
 | **Leitor** | Lê o capítulo escolhido dentro do próprio programa |
@@ -172,8 +172,14 @@ atualização disponível, o selo **↑ Atualizar**.
 > da URL na tela de nova tradução.
 
 A aba **Fontes** é só um atalho: ela mostra os sites com atalho integrado — **Webtoon**
-(https://www.webtoons.com/en/), **Comix** (https://comix.to/browse?genres_in=101137) e
-**Vortex Scans** (https://vortexscans.org/). Ao clicar em "Abrir …", o site abre no seu
+(https://www.webtoons.com/en/; os episódios gratuitos das edições em outros idiomas, como
+`/es/` e `/fr/`, também funcionam), **Comix** (https://comix.to/browse?genres_in=101137),
+**Vortex Scans** (https://vortexscans.org/), **Naver Webtoon** (https://comic.naver.com/webtoon,
+em coreano), **MangaDex** (https://mangadex.org/, vários idiomas), **Tapas** (https://tapas.io/)
+e **INKR** (https://comics.inkr.com/). Só capítulos gratuitos são baixados: um capítulo pago,
+bloqueado ou com login não é aceito. Quando um site recusa a captura automática da página
+inicial, o cartão mostra "Prévia indisponível" — o atalho e o download continuam funcionando.
+Ao clicar em "Abrir …", o site abre no seu
 **navegador padrão** quando você usa a janela do aplicativo, ou numa **nova aba** quando usa
 o Komyst pelo navegador (o Komyst continua aberto). Lá você encontra o capítulo, **copia a URL**
 e volta ao Komyst para colar na aba **Nova tradução** — o processamento continua no fluxo

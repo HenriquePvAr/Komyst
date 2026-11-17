@@ -3613,6 +3613,8 @@ html[data-visual-reduced-motion="1"] .auth-login-shell[data-entered] .auth-login
 .source-card { display: flex; flex-direction: column; gap: 10px; }
 .source-card{overflow:hidden; border-radius:12px; background:#151517;}
 .source-preview{aspect-ratio:16/9; margin:-24px -24px 0; background-color:#242428; background-size:cover; background-position:top center; border-bottom:1px solid var(--line);}
+.source-preview.preview-unavailable{display:flex; align-items:center; justify-content:center;}
+.source-preview.preview-unavailable::after{content:"Prévia indisponível"; color:var(--muted); font-size:13px; letter-spacing:.04em;}
 .source-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .source-card-head h2 { margin: 0; font-size: 18px; line-height: 1.2; }
 .source-card p { margin: 0; flex: 1 1 auto; opacity: .82; font-size: 13px; line-height: 1.5; }

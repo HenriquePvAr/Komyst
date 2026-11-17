@@ -644,6 +644,14 @@ class KomystBackendTranslationProvider:
             "cache_hits": 0,
         }
         self._name_overrides: list[tuple[str, str]] = []
+        self.source_lang = "EN"
+
+    def set_source_language(self, code):
+        """Source language sent with every batch (ISO 639-1, upper case); English by default."""
+        value = str(code or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]{2}", value):
+            raise BackendTranslationError("invalid_source_language")
+        self.source_lang = value
 
     def set_name_overrides(self, pairs):
         """Store user-defined name substitutions applied after translation."""
@@ -789,12 +797,12 @@ class KomystBackendTranslationProvider:
         request_ids = []
         for index, chunk in enumerate(chunks, start=1):
             request_hash = ResultStore._input_hash(
-                BatchRequest(request_id, job_id, "EN", "PT-BR", chunk))
+                BatchRequest(request_id, job_id, self.source_lang, "PT-BR", chunk))
             suffix = f":result:{request_hash[:32]}"
             if len(chunks) > 1:
                 suffix += f":batch:{index:04d}"
             sub_request_id = f"{request_id[:220-len(suffix)]}{suffix}"
-            sub_request = BatchRequest(sub_request_id, job_id, "EN", "PT-BR", chunk)
+            sub_request = BatchRequest(sub_request_id, job_id, self.source_lang, "PT-BR", chunk)
             request_ids.append(sub_request_id)
             responses.append(sub_request)
 

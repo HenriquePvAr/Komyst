@@ -1,6 +1,6 @@
 """Mission 2: the "Fontes" (supported sources) tab is an external-shortcut hub only.
 
-It must expose exactly the three supported sites, open them in the system browser through an
+It must expose exactly the supported sites, open them in the system browser through an
 allow-listed bridge method (never an arbitrary page-supplied URL), never fetch those sites on
 page load, and never reintroduce the removed Profile experience.
 """
@@ -19,6 +19,10 @@ EXPECTED = {
     "webtoon": "https://www.webtoons.com/en/",
     "comix": "https://comix.to/browse?genres_in=101137",
     "vortex": "https://vortexscans.org/",
+    "naver": "https://comic.naver.com/webtoon",
+    "mangadex": "https://mangadex.org/",
+    "tapas": "https://tapas.io/",
+    "inkr": "https://comics.inkr.com/",
 }
 
 
@@ -34,11 +38,11 @@ class SourcesTabTests(unittest.TestCase):
         self.assertNotIn('data-tab="perfil"', SHELL)
         self.assertNotIn('data-tab="profile"', SHELL)
 
-    # D) exactly three sources
-    def test_exactly_three_sources(self):
+    # D) exactly the supported sources
+    def test_exactly_the_supported_sources(self):
         keys = re.findall(r'class="btn-primary source-open"[^>]*data-source="([a-z]+)"', SHELL)
-        self.assertEqual(sorted(keys), ["comix", "vortex", "webtoon"])
-        self.assertEqual(len(desktop_app.SUPPORTED_SOURCE_URLS), 3)
+        self.assertEqual(sorted(keys), sorted(EXPECTED))
+        self.assertEqual(len(desktop_app.SUPPORTED_SOURCE_URLS), len(EXPECTED))
 
     # E/F/G) exact allow-listed destinations
     def test_exact_source_urls(self):
@@ -48,7 +52,8 @@ class SourcesTabTests(unittest.TestCase):
     # resource (img/iframe/href/src) pointing at the source domains -- only opaque keys.
     def test_page_load_has_no_external_resource(self):
         section = SHELL.split('id="view-fontes"', 1)[1].split("</section>", 1)[0]
-        for domain in ("webtoons.com", "comix.to", "vortexscans.org"):
+        for domain in ("webtoons.com", "comix.to", "vortexscans.org", "naver.com", "mangadex.org",
+                       "tapas.io", "inkr.com"):
             self.assertNotIn(domain, section, f"{domain} must not be embedded in the page")
         for eager in ("<img", "<iframe", "<script", "src=", "href="):
             self.assertNotIn(eager, section, f"no eager resource ({eager}) on the Fontes panel")

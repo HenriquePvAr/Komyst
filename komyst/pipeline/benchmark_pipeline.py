@@ -62,6 +62,7 @@ from komyst.ocr.ocr_balloon import (
     apply_group_translations,
     known_sound_translation_target,
     enforce_rapidocr_quality_gate,
+    adopt_chapter_balloon_decisions,
     get_translatable_groups,
     normalize_recurring_compact_names,
     release_group_buffers,
@@ -3784,11 +3785,14 @@ def run_benchmark(args):
     # Reuse the page-local result objects after chapter-level name repair.  The
     # contained group references are the same production objects, so repairs
     # remain visible while the global list is rebuilt deterministically.
-    translation_targets = [
-        item
-        for result in sorted(pre_page_results, key=lambda value: value.page_index)
-        for item in result.translation_items
-    ]
+    promoted = {id(group) for group in adopt_chapter_balloon_decisions(all_analyzed_groups)}
+    translation_targets = []
+    for result in sorted(pre_page_results, key=lambda value: value.page_index):
+        translation_targets.extend(result.translation_items)
+        if promoted and result.analyzable:
+            translation_targets.extend(
+                group for group in (result.page_state or {}).get("groups", [])
+                if id(group) in promoted)
     for state in analyzable_states:
         state["translatable_groups"] = get_translatable_groups(
             state.get("groups", [])

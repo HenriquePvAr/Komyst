@@ -520,3 +520,21 @@ def test_provider_stats_count_sent_texts_and_cache_hits(tmp_path: Path):
     assert provider.stats["api_requests"] == 1
     assert provider.stats["api_texts"] == 2
     assert provider.stats["cache_hits"] == 2
+
+
+def test_translate_many_sends_the_jobs_source_language(tmp_path: Path, monkeypatch):
+    from komyst.translation.providers.translator_nllb import get_translator
+    AuthEnvelopeStore(tmp_path).seal("job-lang", tok())
+    backend = MockBackendClient()
+    provider = KomystBackendTranslationProvider(runtime_root=tmp_path, backend=backend)
+    seen = []
+    original = backend.translate_batch
+    monkeypatch.setattr(backend, "translate_batch", lambda req, *a, **k: (seen.append(req.source_lang), original(req, *a, **k))[1])
+    monkeypatch.setenv("KOMYST_JOB_ID", "job-lang")
+    monkeypatch.setenv("KOMYST_REQUEST_ID", "translation:lang")
+    assert provider.source_lang == "EN"
+    get_translator("2", translation_provider=provider)
+    provider.translate_many(["안녕하세요"])
+    assert seen and set(seen) == {"KO"}
+    with pytest.raises(BackendTranslationError):
+        provider.set_source_language("korean")

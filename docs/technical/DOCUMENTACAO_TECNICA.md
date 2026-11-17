@@ -9,7 +9,7 @@
 > Multi-idioma OCR (§14) reverificado sobre `dev` em 2026-11-03; glossário de nomes (§15)
 > verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `dev`/`main`.
 > §17, "Auditoria linguística e taxonomia semântica", item 5 (retry pelo backend) verificado sobre `885a237` (branch `dev`) em 2026-11-03.
-> **Última revisão:** 2026-11-13 (base verificada `b758ccc`; §26.6)
+> **Última revisão:** 2026-11-17 (base verificada `98b52ff`; fontes novas e idioma de origem)
 > **Público:** desenvolvedores, mantenedores e suporte técnico.
 
 Documentos irmãos: [Guia do Usuário](../user/GUIA_DO_USUARIO.md) ·
@@ -2250,6 +2250,25 @@ falhas pré-job sejam visíveis e recuperáveis para o usuário, com log sanitiz
 source_analysis`, host seguro, classe `source_timeout`/`source_network_error`/parse/internal),
 sem traceback ou secrets, e com liberação do lock do Start. A UI mantém o shell normal de "Nova
 tradução" e não reintroduz a superfície azul de processamento nesse estado.
+
+**Fontes adicionadas em 2026-11-17 (IMPLEMENTADO, download real verificado).**
+`komyst/download/sources/chapter_source.py` registra, em `ADAPTERS`, além de Webtoons, Vortex e
+Comix: `NaverWebtoonAdapter` (`comic.naver.com`, imagens `img[id^=content_image_]` do HTML,
+CDN `image-comic.pstatic.net`; 117/117 páginas num episódio gratuito), `MangaDexAdapter`
+(API pública `api.mangadex.org/at-home/server/{chapter}`, nós `*.mangadex.network`, User-Agent
+identificado, duas chamadas de API por capítulo; 19/19 num capítulo em coreano), `TapasAdapter`
+(`img.content__img[data-src]` no HTML; URLs assinadas usadas na mesma execução; 45/45) e
+`InkrAdapter` (API `icd-api.inkr.com/v1/content_json/batch`; só capítulos lidos de graça —
+`revenueType` `ad`/`free` — porque um capítulo pago devolve apenas páginas de prévia; 31/31).
+As edições do Webtoon em outros idiomas usam o mesmo adapter (verificado em `/es/`, 182 imagens).
+Fontes com API/HTML próprios sobrescrevem `collect_dom_candidates_from_html` (caminho HTTP sem
+navegador) e `score_cluster`. Toda URL continua validada pelas listas `allowed_hosts`/`resource_hosts`.
+MANGA Plus não foi integrado: as imagens são criptografadas e decifrá-las seria contornar uma
+proteção técnica. GlobalComix: PLANEJADO (exige cookie de sessão do leitor).
+Idioma de origem: o idioma escolhido na UI chega ao `KomystBackendTranslationProvider`
+(`set_source_language`, chamado por `get_translator`) e segue em cada lote para o backend; antes
+era sempre `EN`. O OCR de coreano/japonês/chinês ainda NÃO é suportado de ponta a ponta: o
+RapidOCR usa o modelo padrão chinês/inglês para qualquer idioma (PARCIAL — modelos em avaliação).
 
 O mesmo bloco fixa a fronteira de adapters: VortexScans é selecionado pelo host literal
 `vortexscans.org` e não chama `canonicalize_webtoons_url`; Webtoons continua dono do seu

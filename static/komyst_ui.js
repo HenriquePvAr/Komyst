@@ -884,7 +884,7 @@
   }));
   window.addEventListener('komyst-navigate-tab', event => activateTab(event.detail?.tab || 'rewards'));
   $$('[data-goto]').forEach(button => button.addEventListener('click', () => activateTab(button.dataset.goto)));
-  // "Fontes" cards: open one of the three allow-listed sites on an explicit click.
+  // "Fontes" cards: open one of the allow-listed sites on an explicit click.
   // Inside the desktop WebView the bridge opens the system browser (constant
   // server-side URL; the page only sends an opaque key). In a browser tab there
   // is no bridge, so the same constant URL opens in a new tab.
@@ -892,6 +892,10 @@
     webtoon: 'https://www.webtoons.com/en/',
     comix: 'https://comix.to/browse?genres_in=101137',
     vortex: 'https://vortexscans.org/',
+    naver: 'https://comic.naver.com/webtoon',
+    mangadex: 'https://mangadex.org/',
+    tapas: 'https://tapas.io/',
+    inkr: 'https://comics.inkr.com/',
   };
   $$('.source-open').forEach(button => button.addEventListener('click', () => {
     const key = button.dataset.source;
@@ -915,6 +919,10 @@
           refreshing = refreshing || data.refreshing;
           if (/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(data.image || '')) {
             preview.style.backgroundImage = `url("${data.image}")`;
+            preview.classList.remove('preview-unavailable');
+          } else if (data.error && !data.refreshing) {
+            // The site refused an automated capture (a bot check): say so instead of a blank card.
+            preview.classList.add('preview-unavailable');
           }
         } catch (_) { /* the last preview stays; the next refresh retries */ }
       }));

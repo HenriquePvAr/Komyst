@@ -199,3 +199,47 @@ def test_label_list_translation_keeps_one_item_per_line():
     assert ob._label_list_items(group, target) == [
         "Idade: 18", "Altura: 169 cm", "Signo: Áries", "Gosta de: Comidas apimentadas, homens másculos"]
     assert ob._label_list_items(group, "Uma frase qualquer sem rótulos") is None
+
+
+def test_outlined_white_caption_over_dark_art_stays_one_group():
+    from PIL import Image, ImageDraw, ImageFont
+    image = Image.new("RGB", (700, 260), (40, 44, 60))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype("impact.ttf", 44)
+    rows = [("SECOND LEADER OF THE", 40), ("JINGKE CLAN COMMANDER", 98)]
+    lines = []
+    for text, top in rows:
+        draw.text((60, top), text, font=font, fill=(255, 255, 255), stroke_width=5, stroke_fill=(0, 0, 0))
+        x1, y1, x2, y2 = draw.textbbox((60, top), text, font=font, stroke_width=5)
+        lines.append(ob.OCRLine(text=text, confidence=0.98, polygon=np.zeros((4, 2)),
+                                box=(x1, y1, x2 - x1, y2 - y1), raw_text=text))
+    bgr = np.array(image)[:, :, ::-1].copy()
+    assert len(ob._group_lines(lines, image_bgr=bgr)) == 1
+
+
+def test_same_words_follow_the_chapter_balloon_decision():
+    balloon = _group("COUGH COUGH", classification="speech")
+    balloon.background_type = "white_balloon"
+    demoted = _group("COUGH COUGH", classification="sfx")
+    demoted.classification_reason = "repeated_onomatopoeia_over_false_enclosure"
+    demoted.ignored, demoted.ignore_reason = True, "sfx_translation_disabled"
+    footsteps = _group("STEP STEP", classification="sfx")
+    footsteps.classification_reason = "repeated_onomatopoeia_over_false_enclosure"
+    promoted = ob.adopt_chapter_balloon_decisions([balloon, demoted, footsteps])
+    assert promoted == [demoted] and demoted.classification == "speech" and not demoted.ignored
+    assert footsteps.classification == "sfx"
+
+
+def test_dark_ink_in_a_white_balloon_stays_dark_when_the_box_edge_hits_dark_art():
+    from PIL import Image, ImageDraw, ImageFont
+    image = Image.new("RGB", (420, 220), (90, 90, 90))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((14, 14, 406, 206), fill=(255, 255, 255))
+    draw.text((40, 60), "COUGH", font=ImageFont.truetype("arialbd.ttf", 70), fill=(5, 5, 5))
+    group = _group("COUGH")
+    group.background_metrics = {"local_background_class": "textured_art",
+                                "local_background_polarity": "dark_text_on_light_bg",
+                                "local_background_median_bgr": [255.0, 255.0, 255.0]}
+    profile = ob.extract_original_lettering_profile(np.array(image)[:, :, ::-1].copy(), group,
+                                                    (10, 10, 400, 200), fill_ink=True)
+    assert max(profile["dominant_bgr"]) < 60

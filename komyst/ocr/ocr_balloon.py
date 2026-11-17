@@ -818,6 +818,34 @@ def _analyze_image_array(original_bgr, raw_lines, page_index=None):
     return candidates, groups
 
 
+def adopt_chapter_balloon_decisions(groups):
+    """Same words, same decision: a repeat demoted to a sound over a doubtful enclosure
+    follows the chapter's balloon reading of the very same words.
+
+    "COUGH COUGH" in a jagged balloon touching the page gutter was taken for a sound on
+    one page and translated as dialogue in a closed balloon two pages later. When the
+    chapter itself letters those exact words as dialogue inside a balloon, the demoted
+    copy is dialogue too. Returns the groups promoted.
+    """
+    def key(group):
+        return re.sub(r"[^A-Z]", "", str(getattr(group, "text", "") or "").upper())
+
+    in_balloon = {key(group) for group in groups
+                  if group.classification == "speech" and not group.ignored
+                  and str(getattr(group, "background_type", "")) in {"white_balloon", "dark_balloon"}}
+    promoted = []
+    for group in groups:
+        if (group.classification == "sfx"
+                and getattr(group, "classification_reason", "") == "repeated_onomatopoeia_over_false_enclosure"
+                and key(group) and key(group) in in_balloon):
+            _set_group_classification(group, "speech", "chapter_balloon_decision_for_same_words",
+                                      confidence=0.8, evidence={"previous_classification": "sfx"})
+            group.ignored = False
+            group.ignore_reason = ""
+            promoted.append(group)
+    return promoted
+
+
 def get_translatable_groups(groups):
     return [group for group in groups if _should_translate_group(group)]
 
@@ -4449,8 +4477,16 @@ def _border_separates(border, line_box, group):
     height, width = gray.shape
 
     def light_around(box):
+        # The background around the box, not the box itself: white lettering with a dark
+        # outline over dark art is light inside its box but sits on no balloon.
         x, y, w, h = (int(v) for v in box)
-        ring = gray[max(0, y - 3):min(height, y + h + 3), max(0, x - 3):min(width, x + w + 3)]
+        pad = 6
+        y1, y2 = max(0, y - pad), min(height, y + h + pad)
+        x1, x2 = max(0, x - pad), min(width, x + w + pad)
+        window = gray[y1:y2, x1:x2]
+        outside = np.ones(window.shape, dtype=bool)
+        outside[y - y1:y - y1 + h, x - x1:x - x1 + w] = False
+        ring = window[outside]
         return ring.size and float(np.percentile(ring, 70)) >= 200
 
     lx, ly, lw, lh = (int(v) for v in line_box)
@@ -20635,6 +20671,18 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
     bg_gray = float(np.median(cv2.cvtColor(
         border.reshape(1, -1, 3), cv2.COLOR_BGR2GRAY)))
     bg_sat = float(np.median(border_hsv[:, 1]))
+    # The edge of the padded box can fall on the art outside a balloon (dark scenery round
+    # a white balloon), which turned the balloon's white into "white ink with a black
+    # outline". The measured solid ring right round the lettering is the real backdrop.
+    ring_metrics = getattr(group, "background_metrics", None) or {}
+    ring_bgr = ring_metrics.get("local_background_median_bgr")
+    polarity = str(ring_metrics.get("local_background_polarity") or "")
+    if ((str(ring_metrics.get("local_background_class") or "").startswith("solid_")
+         or polarity in {"dark_text_on_light_bg", "light_text_on_dark_bg"})
+            and isinstance(ring_bgr, (list, tuple)) and len(ring_bgr) == 3):
+        ring_gray = float(cv2.cvtColor(np.uint8([[ring_bgr]]), cv2.COLOR_BGR2GRAY)[0, 0])
+        if abs(ring_gray - bg_gray) > 60:
+            bg_gray = ring_gray
     contrast = np.abs(gray.astype(np.float32) - bg_gray)
     sat = hsv[:, :, 1].astype(np.float32)
     val = hsv[:, :, 2].astype(np.float32)
