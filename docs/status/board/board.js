@@ -4,7 +4,7 @@
 window.BOARD = {
   title: 'Komyst · Quadro',
   subtitle: 'Komyst',
-  updatedAt: '2026-11-13',
+  updatedAt: '2026-11-17',
   repoUrl: 'https://github.com/HenriquePvAr/Komyst',
   defaultBranch: 'main',
   columns: [
@@ -27,6 +27,22 @@ window.BOARD = {
     none:   'sem código',
   },
   cards: [
+    {
+      id: 'OCR-EN-DISPLAY-PERF-20261117',
+      title: 'OCR inglês, títulos sobre arte e limpeza localizada',
+      domain: 'pipeline',
+      column: 'dev',
+      env: 'local',
+      updated: '2026-11-17',
+      summary: 'Commit local 129f1e4 em dev: normalização estrutural de zero em palavra, promoção conservadora de títulos tipográficos e medição de halo no recorte da máscara. Grid de Fontes limitado a quatro colunas largas.',
+      risk: 'Suíte completa passou antes do último ajuste de classificação: 6731 passed, 179 skipped, 1 xfailed. No snapshot final, regressão focada: 306 passed, 1 skipped. A página 23 foi reavaliada offline como elegível; render/tradução e tempo do job japonês ainda não foram medidos fisicamente.',
+      blockedBy: 'Reexecutar a página de referência e validar a tradução do título e a limpeza visual; medir o ganho no capítulo japonês antes de integrar à main. Commit ainda não enviado ao remoto.',
+      delivered: [
+        'Regra de OCR sem vocabulário ou nomes específicos',
+        'Halo calculado em recorte com paridade pixel a pixel no teste offline',
+        'Fontes responsiva em 4/3/2/1 colunas'
+      ]
+    },
     {
       "id": "FASE0-JOBS-NAO-MORREM-20261111",
       "title": "Fase 0 — retenção, timeout OCR, PSDs e monitor de recursos",
