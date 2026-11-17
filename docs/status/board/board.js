@@ -34,8 +34,8 @@ window.BOARD = {
       column: 'dev',
       env: 'local',
       updated: '2026-11-17',
-      summary: 'Commit local 129f1e4 em dev: normalização estrutural de zero em palavra, promoção conservadora de títulos tipográficos e medição de halo no recorte da máscara. Grid de Fontes limitado a quatro colunas largas.',
-      risk: 'Suíte completa passou antes do último ajuste de classificação: 6731 passed, 179 skipped, 1 xfailed. No snapshot final, regressão focada: 306 passed, 1 skipped. A página 23 foi reavaliada offline como elegível; render/tradução e tempo do job japonês ainda não foram medidos fisicamente.',
+      summary: 'Commit local 129f1e4 em dev: normalização estrutural de zero em palavra, medição de halo no recorte da máscara. Grid de Fontes limitado a quatro colunas largas.',
+      risk: 'Suíte completa passou antes do último ajuste de classificação: 6731 passed, 179 skipped, 1 xfailed. No snapshot final, regressão focada: 306 passed, 1 skipped. A redução dos limites de promoção de títulos foi revertida: na pág. 23 a limpeza deixava metade das letras originais. Tempo do job japonês não medido.',
       blockedBy: 'Reexecutar a página de referência e validar a tradução do título e a limpeza visual; medir o ganho no capítulo japonês antes de integrar à main. Commit ainda não enviado ao remoto.',
       delivered: [
         'Regra de OCR sem vocabulário ou nomes específicos',

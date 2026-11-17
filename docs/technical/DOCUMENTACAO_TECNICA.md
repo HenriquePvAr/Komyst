@@ -10,7 +10,7 @@
 > verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `dev`/`main`.
 > §17, "Auditoria linguística e taxonomia semântica", item 5 (retry pelo backend) verificado sobre `885a237` (branch `dev`) em 2026-11-03.
 > **Última revisão:** 2026-11-17 (base verificada `98b52ff`; fontes novas e idioma de origem)
-> Paleta do lettering reverificada sobre `dev` (`579d842`) e em job REF-A de 65 páginas em 2026-11-17: título antes azul passou a preto. A limpeza ainda deixa letras originais visíveis; gate em revisão.
+> Paleta do lettering reverificada sobre `dev` (`579d842`) e em job REF-A de 65 páginas em 2026-11-17: título antes azul passou a preto. A promoção desse título foi revertida porque a limpeza deixava letras originais visíveis.
 > **Público:** desenvolvedores, mantenedores e suporte técnico.
 
 Documentos irmãos: [Guia do Usuário](../user/GUIA_DO_USUARIO.md) ·
@@ -1057,9 +1057,11 @@ tradutor.
 - `clean_ocr_text` troca o glifo `0` por `O` em tokens ASCII com pelo menos duas letras e
   sem outros dígitos; identificadores com outros números permanecem intactos. Essa
   normalização não usa nomes ou palavras específicas.
-- Títulos tipográficos com múltiplas palavras distintas sobre arte saturada podem sair da
-  classe decorativa quando a confiança OCR é pelo menos 0,93 e a pontuação de texto
-  principal é pelo menos 0,30. Efeitos repetidos e leituras incertas continuam preservados.
+- Títulos tipográficos sobre arte saturada mantêm os limites de promoção (confiança ≥ 0,95;
+  pontuação de texto principal ≥ 0,35 abaixo disso). Baixá-los (0,93/0,30) promoveu o título
+  do REF-A pág. 23 com o OCR v6 tiny, mas a limpeza deixou metade das letras originais atrás
+  da tradução — pior que o título intacto. Revertido; o título fica preservado até a limpeza
+  desse tipo de lettering ser resolvida.
 
 **Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (o provider
 recebe a fala sem contexto); texto escuro com contorno branco sobre arte pode ficar com

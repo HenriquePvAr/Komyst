@@ -6034,7 +6034,7 @@ def _decorative_short_display_story_promotion_allowed(group):
         main_score = float(getattr(group, "main_text_score", 0.0) or 0.0)
     except (TypeError, ValueError):
         main_score = 0.0
-    if main_score < (0.20 if confidence >= 0.95 else 0.30):
+    if main_score < (0.20 if confidence >= 0.95 else 0.35):
         return False
     folded_words = [
         re.sub(r"[^A-Z']", "", _ascii_fold(word).upper())
@@ -6085,7 +6085,7 @@ def _decorative_short_display_story_promotion_allowed(group):
     # A one-word effect or repeated sound remains preserved.
     distinct = len(set(semantic_words)) == len(semantic_words)
     real_words = sum(1 for word in semantic_words if region_taxonomy.is_english_word(word))
-    typeset_caption = bool(confidence >= 0.93 and distinct and real_words >= 1
+    typeset_caption = bool(confidence >= 0.95 and distinct and real_words >= 1
                            and len(semantic_words) >= 2)
     return (dark_context or clause or typeset_caption) and saturated_context
 

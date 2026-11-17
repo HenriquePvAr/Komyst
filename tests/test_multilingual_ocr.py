@@ -1,6 +1,5 @@
 """Multi-language OCR: per-language model profiles and script-aware line/group rules."""
 import numpy as np
-from types import SimpleNamespace
 
 from komyst.ocr import ocr_balloon as ob
 from komyst.ocr import rapidocr_profiles as rp
@@ -11,20 +10,6 @@ def test_ocr_zero_in_alphabetic_token_is_normalized_without_word_list():
     assert clean_ocr_text("IT'S TO0 OBVIOUS. NOT TO0 SHABBY.") == "IT'S TOO OBVIOUS. NOT TOO SHABBY."
     assert clean_ocr_text("B0OK R2D2 AB02 A0") == "BOOK R2D2 AB02 A0"
     assert clean_ocr_text("記憶0喪失") == "記憶0喪失"
-
-
-def test_clear_multiword_display_title_promotes_without_repeated_sound():
-    def group(text):
-        return SimpleNamespace(
-            text=text, classification="decorative", preserve_as_name=False,
-            quality_reasons=[], confidence=0.941, main_text_score=0.34,
-            background_type="textured_art", detected_proper_names=[],
-            background_metrics={"context_saturation_mean": 154,
-                                "context_dark_pixel_ratio": 0.72,
-                                "context_white_pixel_ratio": 0.06},
-        )
-    assert ob._decorative_short_display_story_promotion_allowed(group("RADIANT SILVER WINGS"))
-    assert not ob._decorative_short_display_story_promotion_allowed(group("BOOM BOOM BOOM"))
 
 
 def test_language_choices_map_to_profiles_and_missing_models_keep_the_bundled_engine(tmp_path, monkeypatch):
