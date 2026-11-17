@@ -1031,15 +1031,33 @@ tradutor.
 - `split_glued_source_words()` não precisa de exceção: só reescreve tokens `[A-Za-z]`
   (`re.sub` final da função), então texto CJK, Hangul e cirílico passa intacto.
 
-**O que falta (PLANEJADO):**
+**Perfis de OCR por idioma (IMPLEMENTADO, `komyst/ocr/rapidocr_profiles.py`):**
 
-- `komyst/ocr/ocr_models.py` tem o catálogo por idioma (`rec_model_for`, `model_path`,
-  `ensure_model`; diretório em `KOMYST_OCR_MODELS_DIR`, padrão `%APPDATA%/komyst_ocr_models`),
-  mas **nenhum código de produção chama `ensure_model`**, e o `OCREngine` inicializa o RapidOCR
-  sempre com o modelo padrão (`RapidOCR()`), sem `rec_model_path`. A qualidade de leitura de
-  japonês, coreano e cirílico com o modelo padrão **não foi medida**.
-- Todos os `sha256` do catálogo estão vazios, o que desliga a verificação pós-download; precisam
-  dos hashes reais antes de o download ser ligado.
+- `OCREngine._get_rapidocr` consulta `profile_for(lang_choice, config.OCR_ENGLISH_PROFILE)`; com
+  perfil, roda RapidOCR 3 (`rapidocr`) via `RapidOCRProfileEngine`, que devolve os formatos do
+  RapidOCR 1.x (`[[polígono, texto, score]]`; só reconhecimento: `[[texto, score]]`), sob o
+  `DIRECTML_LOCK` quando há GPU.
+- Coreano → PP-OCRv5 mobile (det `ch`) + rec `korean`; japonês/chinês → PP-OCRv6 manga
+  (det/rec + dicionário, `Det.thresh` 0.15 / `box_thresh` 0.25 / `unclip_ratio` 1.5); inglês →
+  PP-OCRv6 tiny por padrão (`OCR_ENGLISH_PROFILE=ppocrv6_tiny`; `bundled` volta ao modelo antigo).
+  Medido nas páginas de referência: 28–36 % mais rápido que o modelo empacotado, com espaços
+  entre palavras.
+- Modelos em `ocr_models.models_dir()/rapidocr/<pasta>` (`v5_mobile`, `ppocrv6_manga`, `v6`).
+  Arquivo ausente ou `rapidocr` não instalado → `None` → modelo empacotado. O empacotamento dos
+  modelos no instalador **não existe** (PLANEJADO).
+- Regras de script em `ocr_balloon.py`: a regra de vogais de `_looks_like_noise` só vale para
+  letras latinas; prosa em escrita não latina deixa de ser classificada como SFX
+  (`non_latin_script_prose`); colunas verticais CJK (`_vertical_cjk_line`,
+  `_group_is_vertical_cjk`) são lidas da direita para a esquerda, agrupadas por coluna vizinha e
+  desenhadas na horizontal numa caixa alargada; o tamanho da fonte usa a largura da coluna e o
+  teto `MAX_FONT_SIZE` sobe até esse tamanho.
+- `_deduplicate_tiled_ocr_lines` descarta leituras ≥ 80 % cobertas por uma leitura mais longa
+  (fragmentos cortados entre tiles).
+
+**Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (o provider
+recebe a fala sem contexto); texto escuro com contorno branco sobre arte pode ficar com
+resíduo, e a validação de remoção o reporta como removido; russo e espanhol usam o modelo
+empacotado; o catálogo `ocr_models.ensure_model` continua sem chamador de produção.
 
 ## 15. Tradução: abstração de provider
 

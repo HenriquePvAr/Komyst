@@ -113,3 +113,17 @@ class OutputFormatInvariantTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RebuildPreservesSourceLanguageTests(unittest.TestCase):
+    """A Korean job ran as English: the post-analysis rebuild dropped ``--source-lang``."""
+
+    def test_source_language_survives_rebuild(self):
+        job = _job("pdf")
+        job["configuration"]["source_lang"] = "2"
+        cmd = command_with_source_selection(job, {"candidate_ids": ["a1"], "selected_ids": ["a1"]})
+        self.assertEqual(cmd[cmd.index("--source-lang") + 1], "2")
+
+    def test_english_job_needs_no_flag(self):
+        cmd = command_with_source_selection(_job("pdf"), {"candidate_ids": ["a1"], "selected_ids": ["a1"]})
+        self.assertNotIn("--source-lang", cmd)

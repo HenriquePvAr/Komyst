@@ -4352,7 +4352,9 @@ def _looks_like_noise(text):
     if not compact:
         return True
 
-    if len(compact) <= 2 and compact.upper() not in SHORT_REAL_TEXTS:
+    # Two Latin letters are rarely a word; two kana/Han/Hangul characters usually are ("ない").
+    if (len(compact) <= 2 and compact.upper() not in SHORT_REAL_TEXTS
+            and len(_NON_LATIN_SCRIPT.findall(compact)) < 2):
         return True
 
     # Censorship masks (a letter followed by * or #, e.g. "D***", "H#**") are
@@ -4371,9 +4373,9 @@ def _looks_like_noise(text):
     if odd / max(1, len(sanitized)) > 0.28:
         return True
 
-    letters = _letters(text)
-    normalized = unicodedata.normalize("NFKD", text)
-    vowels = sum(char in "AEIOUaeiou" for char in normalized)
+    # A run of Latin letters without a vowel is noise; Hangul/kana/CJK have no Latin vowels.
+    letters = [char for char in unicodedata.normalize("NFKD", text) if "A" <= char.upper() <= "Z"]
+    vowels = sum(char in "AEIOUaeiou" for char in letters)
     if len(letters) >= 5 and vowels == 0:
         return True
 
@@ -4409,6 +4411,28 @@ def _text_columns(lines):
     return ordered
 
 
+def _vertical_cjk_line(line, loose=False):
+    """A column of vertical CJK lettering (tategaki).
+
+    ``loose`` also admits a short column (up to three characters, e.g. "ない"), which is
+    nearly square and only reads as a column next to taller ones.
+    """
+    text = str(getattr(line, "text", "") or "")
+    script = _NON_LATIN_SCRIPT.findall(text)
+    if not script:
+        return False
+    _x, _y, w, h = line.box
+    if h >= 1.5 * max(1, w):
+        return True
+    return bool(loose and len(script) <= 3 and h >= 0.9 * max(1, w))
+
+
+def _group_is_vertical_cjk(group):
+    lines = [line for line in getattr(group, "lines", None) or [] if getattr(line, "box", None)]
+    return bool(lines) and all(_vertical_cjk_line(line, loose=True) for line in lines) and any(
+        _vertical_cjk_line(line) for line in lines)
+
+
 def reading_order(lines):
     """Lines of a text region in reading order: rows top to bottom, then left to right.
 
@@ -4425,6 +4449,22 @@ def reading_order(lines):
     geometry cannot separate keep the order they arrived in.
     """
 
+    lines = list(lines or [])
+    if lines and all(_vertical_cjk_line(line, loose=True) for line in lines) and any(
+            _vertical_cjk_line(line) for line in lines):
+        # Vertical CJK lettering (tategaki): columns read right to left, each top to bottom.
+        columns_v = []
+        for line in sorted(lines, key=lambda item: -(item.box[0] + item.box[2] / 2.0)):
+            left, right = line.box[0], line.box[0] + max(1, line.box[2])
+            for column in columns_v:
+                overlap = min(column[1], right) - max(column[0], left)
+                if overlap >= 0.5 * min(right - left, column[1] - column[0]):
+                    column[0], column[1] = min(column[0], left), max(column[1], right)
+                    column[2].append(line)
+                    break
+            else:
+                columns_v.append([left, right, [line]])
+        return [line for column in columns_v for line in sorted(column[2], key=lambda item: item.box[1])]
     columns = _text_columns(lines)
     if columns:
         return [line for column in columns for line in reading_order(column)]
@@ -4635,6 +4675,17 @@ def _line_belongs_to_group(line, group):
     ):
         return False
     avg_height = max(base_height, gh / max(1, len(group.lines)))
+
+    # Vertical CJK lettering: a balloon is several columns side by side, so its lines
+    # are neighbours across x, not stacked rows. A column overlapping the group's height
+    # and a column-width away belongs to it.
+    lines_all = [line, *group.lines]
+    if (all(_vertical_cjk_line(item, loose=True) for item in lines_all)
+            and any(_vertical_cjk_line(item) for item in lines_all)):
+        column_w = max(lw, float(np.median([item.box[2] for item in group.lines])))
+        gap_x = max(gx, lx) - min(gx + gw, lx + lw)
+        overlap_y = min(gy + gh, ly + lh) - max(gy, ly)
+        return gap_x <= 1.5 * column_w and overlap_y >= 0.3 * min(gh, lh)
 
     # Same reading row: a fragment sitting beside the group's text on the same
     # baseline is the tail of that line (an exclamation split off the end), not a
@@ -5333,6 +5384,16 @@ def _classify_groups(groups, image_bgr, page_index=None):
             group.classification = "decorative"
         else:
             group.classification = "unknown"
+
+        # The rules above count English words. Text in another script (Hangul, kana, Han,
+        # Cyrillic) has none, so a whole sentence looked like a lone sound. Several distinct
+        # characters of such a script are written prose; a short repeat stays a sound.
+        script_chars = _NON_LATIN_SCRIPT.findall(str(group.text or ""))
+        # Inside a balloon even a one-syllable "허...?" (huh?) is speech.
+        if ((len(set(script_chars)) >= 3 or (balloon_like and script_chars))
+                and group.classification in {"sfx", "unknown", "decorative"}):
+            group.classification = "speech" if balloon_like else "narration"
+            group.classification_reason = "non_latin_script_prose"
 
         if editorial_evidence and group.classification == "decorative":
             _set_group_classification(
@@ -18744,6 +18805,16 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         return _draw_rotated_caption_translation(img_bgr, group, font_path, text)
 
     draw_box = _safe_draw_box(group.box, img_bgr.shape, group)
+    vertical_source = _group_is_vertical_cjk(group)
+    if vertical_source:
+        # Vertical CJK columns are tall and narrow; the translation is set horizontally,
+        # so it gets a block as wide as the columns are tall (centred, inside the page) -
+        # the balloon fit below narrows it to the balloon when one encloses the text.
+        bx, by, bw, bh = (int(v) for v in draw_box)
+        width_target = min(int(img_bgr.shape[1]), max(bw, int(0.85 * bh)))
+        cx = bx + bw / 2.0
+        nx = int(max(0, min(img_bgr.shape[1] - width_target, cx - width_target / 2.0)))
+        draw_box = (nx, by, width_target, bh)
     group.safe_area = tuple(draw_box)
     style = (
         _caption_overlay_text_style(img_bgr, draw_box)
@@ -18776,7 +18847,9 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     content_w = max(12, w - inset_x * 2)
     content_h = max(12, h - inset_y * 2)
 
-    source_line_heights = [line.box[3] for line in group.lines if line.box[3] > 0]
+    # A vertical column's character size is its width; its height is the whole column.
+    source_line_heights = [line.box[2] if vertical_source else line.box[3]
+                           for line in group.lines if line.box[3] > 0]
     source_height = float(np.median(source_line_heights)) if source_line_heights else h
     # The smallest size this balloon may use: the global floor, unless the page's own
     # lettering is smaller (manga scans at ~960 px wide letter at ~15 px). There the
@@ -18804,6 +18877,10 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
             int(max(1, h) * 0.42),
         )
         typography_profile["display_font_cap"] = int(font_cap)
+    if vertical_source:
+        # A column's width is the measured letter size (the role the ink cap height plays
+        # for horizontal lines): high-resolution raws letter far above the global cap.
+        font_cap = max(font_cap, int(source_height * size_scale))
     font_size = min(font_cap, max(min_font, int(source_height * size_scale)))
     # The cleanup measured the source outline's real width (``_group_stroke_band``);
     # an outline the colour sampler read thinner is drawn at that width, capped at
@@ -18877,7 +18954,7 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     # Display lettering (a shout, a caption in a condensed face) starts from its real letter height
     # too: its fixed share of the OCR box rendered it at about half the source height. Only a
     # translated sound effect keeps its own rule, the size of the drawn sound.
-    if not is_sfx:
+    if not is_sfx and not vertical_source:
         source_cap = _source_ink_cap_height(typography_source, group)
         if source_cap:
             probe = get_font(preview_font_path or font_path, 100, role=font_role,
@@ -19009,6 +19086,9 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     if balloon_area is not None:
         gx, gy, gw, gh = (int(v) for v in group.box)
         reach_x, reach_y = int(round(0.25 * gw)), int(round(0.25 * gh))
+        if _group_is_vertical_cjk(group):
+            # A column's balloon is as wide as the column is tall, not 25 % wider than it.
+            reach_x = max(reach_x, int(round(0.5 * gh)))
         own_region = np.zeros(balloon_area.shape, dtype=bool)
         own_region[max(0, gy - reach_y):gy + gh + reach_y, max(0, gx - reach_x):gx + gw + reach_x] = True
         balloon_area = balloon_area & own_region

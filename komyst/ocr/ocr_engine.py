@@ -742,6 +742,29 @@ class OCREngine:
         return self._paddle_instances[cache_key]
 
     def _get_rapidocr(self):
+        from komyst.ocr.rapidocr_profiles import RapidOCRProfileEngine, profile_for
+
+        # The source language reads with the model that read it best (Korean, Japanese,
+        # Chinese, optionally English); without one, the bundled RapidOCR model.
+        profile = profile_for(self.lang_choice, str(getattr(config, "OCR_ENGLISH_PROFILE", "") or ""))
+        if profile is not None:
+            if profile.name not in self._rapidocr_instances:
+                with self._rapidocr_init_lock:
+                    if profile.name not in self._rapidocr_instances:
+                        from komyst.core.gpu import DIRECTML_LOCK, directml_enabled
+
+                        gpu = directml_enabled()
+                        print(f"Inicializando RapidOCR / {profile.name}" + (" (GPU DirectML)..." if gpu else "..."))
+                        engine = RapidOCRProfileEngine(profile, use_dml=gpu)
+                        if gpu:
+                            # Every DirectML run goes through the one lock (komyst.core.gpu).
+                            unlocked = engine
+
+                            def engine(image, use_cls=False, **kwargs):
+                                with DIRECTML_LOCK:
+                                    return unlocked(image, use_cls=use_cls, **kwargs)
+                        self._rapidocr_instances[profile.name] = engine
+            return self._rapidocr_instances[profile.name]
         cache_key = "default"
         if cache_key not in self._rapidocr_instances:
             with self._rapidocr_init_lock:
@@ -2143,6 +2166,30 @@ def _deduplicate_tiled_ocr_lines(lines):
             duplicates += 1
             if float(line.confidence or 0) > float(kept[duplicate_index].confidence or 0):
                 kept[duplicate_index] = line
+    # A tile edge cuts a vertical column (or a line) into a short partial read that the
+    # neighbouring tile read whole: a reading whose box other, longer readings already
+    # cover (>= 80 %) is that fragment ("しま" of "しましょう", "癒身" across two columns).
+    fragments = set()
+    for index, line in enumerate(kept):
+        x, y, width, height = (int(v) for v in line.box)
+        if width <= 0 or height <= 0:
+            continue
+        covered = np.zeros((height, width), dtype=bool)
+        for other_index, other in enumerate(kept):
+            if other_index == index or other_index in fragments:
+                continue
+            if len(str(other.text or "")) <= len(str(line.text or "")):
+                continue
+            ox, oy, ow, oh = (int(v) for v in other.box)
+            x1, y1 = max(x, ox) - x, max(y, oy) - y
+            x2, y2 = min(x + width, ox + ow) - x, min(y + height, oy + oh) - y
+            if x2 > x1 and y2 > y1:
+                covered[y1:y2, x1:x2] = True
+        if covered.mean() >= 0.8:
+            fragments.add(index)
+    if fragments:
+        duplicates += len(fragments)
+        kept = [line for index, line in enumerate(kept) if index not in fragments]
     return kept, duplicates
 
 

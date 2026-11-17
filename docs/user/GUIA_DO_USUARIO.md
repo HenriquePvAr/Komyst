@@ -1,6 +1,6 @@
 # Komyst — Guia do Usuário
 
-> **Base verificada:** `98b52ff` · **Revisado em:** 2026-11-17 · Idioma original reverificado sobre `dev` (`885a237`) em 2026-11-03; glossário de nomes verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `main`
+> **Base verificada:** `2d8a929` · **Revisado em:** 2026-11-17 · Idioma original reverificado sobre `dev` (`885a237`) em 2026-11-03; glossário de nomes verificado sobre `22f595d` (feat/GLOSSARY-01), integrado em `main`
 > **Para quem é:** Scans, tradutores, editores e testadores da Beta. Nenhum conhecimento
 > técnico é necessário.
 
@@ -260,9 +260,11 @@ dela, uma linha curta descreve o modo selecionado.
 **Espanhol / Latino**. O tradutor recebe o idioma escolhido; escolha sempre o idioma real do
 capítulo.
 
-> **Atenção:** só o **Inglês** está pronto. Nos outros idiomas o programa ainda lê o texto com o
-> modelo de reconhecimento padrão, então balões podem sair mal lidos, sem tradução ou ir para a
-> revisão. O reconhecimento específico por idioma chega num próximo update.
+> **Japonês, coreano e chinês** usam um modelo de reconhecimento próprio quando os arquivos do
+> modelo estão instalados nesta máquina: o texto vertical do japonês é lido da direita para a
+> esquerda, e a tradução é escrita na horizontal, dentro do balão. Ainda podem sair errados: nomes
+> próprios traduzidos ao pé da letra e texto com contorno branco desenhado sobre a arte (pode ficar
+> parte do texto original). **Russo** e **espanhol** ainda usam o modelo padrão.
 
 | Modo | Quando usar |
 | --- | --- |

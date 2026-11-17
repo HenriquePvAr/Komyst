@@ -470,6 +470,10 @@ LAMA_MIN_FREE_RAM_MB = _env_int("LAMA_MIN_FREE_RAM_MB", 1500)
 # FLUX keeps its weights in VRAM by default (sd-cli peak RSS measured ~0.7 GB on an 8 GB
 # GPU); FLUX_OFFLOAD_TO_CPU=1 moves them to system RAM (~4.6 GB RSS) for smaller GPUs.
 FLUX_OFFLOAD_TO_CPU = _env_bool("FLUX_OFFLOAD_TO_CPU", False)
+# English page OCR model: PP-OCRv6 tiny (about 30 % faster than the bundled model on the reference
+# chapters, with real word spaces); "bundled" keeps the bundled RapidOCR model. Missing model files
+# fall back to the bundled model either way.
+OCR_ENGLISH_PROFILE = os.getenv("OCR_ENGLISH_PROFILE", "ppocrv6_tiny").strip().lower()
 FLUX_MIN_FREE_RAM_MB = _env_int("FLUX_MIN_FREE_RAM_MB", 6000 if FLUX_OFFLOAD_TO_CPU else 1500)
 LAMA_MAX_CROP_PIXELS = _env_int("LAMA_MAX_CROP_PIXELS", 4_000_000)
 # Lean the drawn translation like the source lettering (measured slant) when the

@@ -5192,7 +5192,11 @@ def run_benchmark(args):
         "job_end_offset_ns": max(0, time.perf_counter_ns() - monotonic_origin_ns),
         "absolute_offsets_available": False,
     }
-    print(dumps_json(console_report, ensure_ascii=False, indent=2), flush=True)
+    # The console may be a legacy code page (cp1252): Hangul/kana in the report crashed the
+    # run at its very end. Escape what the console cannot show; the JSON files keep UTF-8.
+    text = dumps_json(console_report, ensure_ascii=False, indent=2)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, errors="backslashreplace").decode(encoding), flush=True)
     return report
 
 
@@ -5505,8 +5509,27 @@ def _resolve_layout_overflow_before_settlement(
 
     pending = [state for state in page_states if state.get("status") != "completed"]
     workers = min(_pipeline_page_workers(), max(1, len(pending)))
+    # The layout check renders every page once (minutes on large pages): report it, or the
+    # UI sits at "translation 0/N" as if the job had frozen.
+    progress_lock = threading.Lock()
+    progress_done = [0]
+
+    def report_preflight_page():
+        with progress_lock:
+            progress_done[0] += 1
+            done = progress_done[0]
+        emit_progress_v1(stage_id="rendering", phase="render", status="running",
+                         stage_current=done, stage_total=len(pending))
+
+    if pending:
+        emit_progress_v1(stage_id="rendering", phase="render", status="running",
+                         stage_current=0, stage_total=len(pending))
     if workers == 1:
-        return sum(preflight(state) for state in pending)
+        total = 0
+        for state in pending:
+            total += preflight(state)
+            report_preflight_page()
+        return total
 
     run_recorder = ocr_line_provenance.active()
 
@@ -5520,6 +5543,7 @@ def _resolve_layout_overflow_before_settlement(
             return preflight(state), recorder
         finally:
             ocr_line_provenance.deactivate()
+            report_preflight_page()
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="preflight-page") as executor:
         results = list(executor.map(preflight_in_thread, pending))

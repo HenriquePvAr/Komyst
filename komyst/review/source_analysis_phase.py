@@ -181,6 +181,9 @@ def command_with_source_selection(job: dict[str, Any], selection: dict[str, Any]
         # Same reasoning for the PSD typesetting mode: the rebuild must not drop it,
         # or a psd job requested with typesetting off would silently render on.
         typesetting_mode=str(config.get("typesetting_mode") or "on"),
+        # And the source language: dropped here, every job ran as English whatever the
+        # user picked (a Korean chapter OCR'd with the English/Chinese model).
+        source_lang=str(config.get("source_lang") or "3"),
         python_executable=sys.executable,
     ), config), config)
 
