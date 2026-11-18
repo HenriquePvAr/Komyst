@@ -168,7 +168,11 @@ class RapidOCRProfileEngine:
 
     def __call__(self, image, use_cls=False, use_det=True, use_rec=True, **_ignored):
         started = time.perf_counter()
-        with self._call_lock:
+        lock = getattr(self, "_call_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._call_lock = lock
+        with lock:
             if use_det is False:
                 # Recogniser only (a crop already holding one line): RapidOCR 1.x shape
                 # ``[[text, score], ...]``. RapidOCR 3's ``update_params`` mutates ``self._engine``

@@ -84,9 +84,8 @@ com resíduos de texto ou reconstrução incerta continuam sujeitas à revisão 
 
 ## 3. O que você precisa no computador
 
-Para RAM, placa de vídeo e tempo, consulte o [perfil de hardware medido](../HARDWARE_PROFILE.md).
-A configuração de referência testada com FLUX usa 32 GB de RAM e uma RX 6600
-de 8 GB; isso não é um mínimo homologado nem uma promessa de tempo por capítulo.
+Para RAM, placa de vídeo, perfis (`leve`, `equilibrado`, `qualidade`) e tempos medidos por fonte, consulte o [perfil de hardware medido](../HARDWARE_PROFILE.md).
+A configuração de referência usa 32 GB de RAM e uma RX 6600 de 8 GB; em computadores e notebooks com menos memória ou vídeo integrado (abaixo de 12 GB de RAM ou 3,5 GB de VRAM dedicada), o Komyst ativa automaticamente o perfil **`leve`** (que reduz o consumo do pipeline para ~1,1–2,1 GB de RAM residente, embora a homologação física num notebook de 8 GB permaneça pendente).
 
 - **Windows 64 bits** (é o único sistema testado de ponta a ponta);
 - **Google Chrome** pode ser necessário para caminhos de descoberta/download que usam fallback de navegador; algumas fontes usam HTTP direto;

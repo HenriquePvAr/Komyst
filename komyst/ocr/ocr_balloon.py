@@ -11079,7 +11079,10 @@ def _box_inside(inner, outer):
 
 
 PORTUGUESE_ACCENTED_FOLD_TOKENS = {"SO"}
-PORTUGUESE_FOR_PREVIOUS_CONTEXT = {"COMO", "ONDE", "QUANDO", "QUE", "QUEM", "SE"}
+PORTUGUESE_FOR_PREVIOUS_CONTEXT = {
+    "COMO", "CONFORME", "ENQUANTO", "ONDE", "QUAIS", "QUAL",
+    "QUANDO", "QUANTA", "QUANTAS", "QUANTO", "QUANTOS", "QUE", "QUEM", "SE",
+}
 PORTUGUESE_FOR_CONTEXT_BRIDGE_TOKENS = {
     "AINDA",
     "ASSIM",
@@ -11100,7 +11103,7 @@ PORTUGUESE_FOR_CONTEXT_BRIDGE_TOKENS = {
 PORTUGUESE_FOR_LEFT_CONTEXT_WINDOW = 7
 PORTUGUESE_FOR_NEGATION_TOKENS = {"NAO", "NUNCA", "JAMAIS"}
 PORTUGUESE_FOR_NEXT_TOKENS = {
-    "UM", "UMA", "UNS", "UMAS", "NINGUEM", "NADA", "POSSIVEL", "VERDADE", "PRECISO",
+    "UM", "UMA", "UNS", "UMAS", "NINGUEM", "NADA", "POSSIVEL", "VERDADE", "PRECISO", "NECESSARIO", "NECESSARIA",
 }
 HIGH_CONFIDENCE_RESIDUAL_SPANISH_MARKERS = {
     "AHORA",
@@ -11212,7 +11215,10 @@ def _is_portuguese_folded_token(token_infos, index):
         )
     ):
         return True
-    if index > 0 and index + 1 < len(token_infos):
+    left_window = tokens[max(0, index - PORTUGUESE_FOR_LEFT_CONTEXT_WINDOW):index]
+    if index > 0 and index + 1 < len(token_infos) and any(
+        tok in PORTUGUESE_FOR_PREVIOUS_CONTEXT for tok in left_window
+    ):
         prev_info = token_infos[index - 1]
         next_info = token_infos[index + 1]
         pt_vocab = portuguese_words._portuguese_words()

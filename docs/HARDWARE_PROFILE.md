@@ -113,51 +113,51 @@ máquina sem aplicativos pesados concorrentes, mesma entrada/configuração,
 separando FLUX ligado/desligado; depois testar limites menores de hardware.
 Não reduzir os gates de qualidade para apresentar um consumo menor.
 
-## Perfis de hardware (seleção implementada; métricas A MEDIR)
+## Perfis de hardware (`leve`, `equilibrado`, `qualidade`) e medições em 7 fontes (18/11/2026)
 
-> **Estado:** a seleção de perfil está IMPLEMENTADA. As **métricas e os requisitos abaixo NÃO foram medidos**:
-> a tabela de métricas está "A MEDIR" e o texto de requisitos é **ESTIMADO / NÃO HOMOLOGADO**.
-> Nenhum requisito mínimo está homologado em hardware daquele porte.
+> **Estado:** seleção automática/manual de perfil **IMPLEMENTADA** (`komyst/runtime/hardware_profile.py`) e **MEDIDA** nos três perfis na máquina de referência (`AMD Ryzen 5 5600GT`, 31,37 GiB RAM, `AMD Radeon RX 6600` 8 GB, Windows 64 bits).
+> **Limite importante (`EXTERNAL_GATE`):** a execução física num notebook fraco real (por exemplo 8 GB de RAM com GPU integrada, a partir do executável Windows compilado) **ainda não foi realizada**; os requisitos mínimos abaixo são **ESTIMADOS / NÃO HOMOLOGADOS** em hardware de entrada, baseados no consumo real medido da árvore do pipeline sob `HARDWARE_PROFILE=leve`.
 
-### Os três perfis
+### Os três perfis (`PROFILE_VALUES`)
 
-| Perfil | Escolha automática (RAM total / VRAM dedicada) | Efeito |
+| Perfil | Escolha automática (`ram_total_gb` / `gpu_vram_gb`) | Defaults aplicados (quando não sobrescritos no ambiente) |
 |---|---|---|
-| Leve | RAM < 12 GB, VRAM < 3,5 GB ou medição indisponível | 1 página por vez, sem varredura residual, sem comparação de preenchimentos |
-| Equilibrado | RAM ≥ 12 GB e VRAM ≥ 3,5 GB | 2 páginas em paralelo, varredura residual e comparação de preenchimentos ligadas |
-| Qualidade | RAM ≥ 24 GB e VRAM ≥ 7,5 GB | paralelismo automático, varredura residual e comparação ligadas |
+| `leve` | RAM < 12 GB, VRAM < 3,5 GB ou medição indisponível | `PIPELINE_PAGE_WORKERS=1`, `OCR_RESIDUAL_SWEEP_MODE=off`, `CLEAN_COMPARE_FILLS=0`, `CLEAN_SURFACE_FILL=0`, `FONT_RASTER_MATCH=0`, `LAMA_MAX_INFER_SIDE=576`, `ADVANCED_ART_INPAINTING=1` |
+| `equilibrado` | RAM ≥ 12 GB e VRAM ≥ 3,5 GB | `PIPELINE_PAGE_WORKERS=2`, `OCR_RESIDUAL_SWEEP_MODE=always`, `CLEAN_COMPARE_FILLS=1`, `LAMA_MAX_INFER_SIDE=768`, `ADVANCED_ART_INPAINTING=1` |
+| `qualidade` | RAM ≥ 24 GB e VRAM ≥ 7,5 GB | `PIPELINE_PAGE_WORKERS=auto` (limitado por megapixels: ≤ 2 em ≥ 6 MP, 1 em ≥ 10 MP), `OCR_RESIDUAL_SWEEP_MODE=always` (executado apenas quando o idioma de origem é inglês), `CLEAN_COMPARE_FILLS=1`, `LAMA_MAX_INFER_SIDE=896`, `ADVANCED_ART_INPAINTING=1` |
 
-Valores exatos por variável: [`CONFIGURATION.md`](CONFIGURATION.md). O FLUX (`GENERATIVE_INPAINT_ENABLED`) nunca é
-ligado por perfil.
+Valores detalhados por variável: [`CONFIGURATION.md`](CONFIGURATION.md). O FLUX (`GENERATIVE_INPAINT_ENABLED`) nunca é ligado por perfil.
 
 ### Como o perfil é escolhido
 
-1. `HARDWARE_PROFILE=leve|equilibrado|qualidade` força o perfil.
-2. `HARDWARE_PROFILE=auto` (padrão) detecta RAM e VRAM; sem medição, usa Leve. A VRAM vem do `nvidia-smi`, ou do tamanho de 64 bits no registro de vídeo do Windows (`HardwareInformation.qwMemorySize`); o `AdapterRAM` do WMI trunca em 4 GB e só é usado como último recurso. Placas de 8 GB reportam ~7,98 GiB, por isso o corte é 7,5 (e 3,5 para 4 GB).
-3. Uma variável de ambiente explícita (por exemplo `PIPELINE_PAGE_WORKERS`) sempre vence o valor do perfil.
+1. `HARDWARE_PROFILE=leve|equilibrado|qualidade` força o perfil manualmente (em `.env` ou `.env.local`, reiniciando o worker).
+2. `HARDWARE_PROFILE=auto` (padrão) detecta RAM (`psutil`) e VRAM dedicada (`nvidia-smi`, registro de vídeo Windows de 64 bits `HardwareInformation.qwMemorySize`, ou fallback WMI); sem medição, degrada de forma conservadora para `leve`. Placas de 8 GB reportam ~7,98 GiB e placas de 4 GB reportam ~3,99 GiB, por isso os cortes são `7,5` e `3,5`.
+3. Qualquer variável explícita já presente no ambiente ou no `.env` / `.env.local` (por exemplo `PIPELINE_PAGE_WORKERS`) prevalece sobre o default do perfil e é registrada em `overridden_by_env`.
 
-O perfil e o motivo aparecem no log do job e em `timing_report.json` (`hardware_profile`).
+O perfil efetivo e o motivo aparecem no log do job (`HARDWARE_PROFILE ...`) e em `timing_report.json` (`hardware_profile`).
 
-### Métricas por perfil
+### Medições físicas por fonte, idioma e perfil (18/11/2026 — `Forçar reprocessamento=ON`, sem cache)
 
-Máquina de medição (2026-11-13): 31,4 GB de RAM, AMD Radeon RX 6600 com 8 GB, Windows 10. Capítulo de referência de 58
-balões / 65 páginas lógicas, modo "Tradução pronta", sem cache. A RAM do sistema estava em 61–66% durante as
-medições (outros contêineres em uso na mesma máquina).
+Todas as execuções abaixo rodaram de ponta a ponta pelo worker real autenticado (`komyst_backend` / DeepL, modo `Qualidade`, `TRANSLATE_SFX=False`, `Manter arquivos de trabalho=ON`) na máquina de referência. A coluna de VRAM dedicada (`resource_report.json`, contadores Windows PDH `\GPU Adapter Memory(*)\Dedicated Usage`) reflete o uso dedicado total do adaptador durante o job (incluindo desktop/navegador abertos na sessão):
 
-| Perfil | Tempo total | Pico de RAM do pipeline | Pico de VRAM | MB em disco por página | Qualidade | Classificação |
-|---|---|---|---|---|---|---|
-| Leve | não medido | não medido | não medido | não medido | não medido | ESTIMADO |
-| Equilibrado | 338 s | 2 777 MB | não medido | ~9,5 MB | 56/58 traduzidos | MEDIDO |
-| Qualidade | 308 s | 2 743 MB | não medido | ~9,5 MB | 56/58 traduzidos | MEDIDO |
+| Fonte | Idioma | Perfil | Job ID | Págs lógicas | Tempo total (pipeline s/ download) | RSS pipeline médio / pico | RSS filhos pico | VRAM adaptador média / pico | Fidelidade semântica / Clean | Classificação |
+|---|---|---|---|---:|---:|---:|---:|---:|---|---|
+| Naver Webtoon | Coreano (`ko`) | `qualidade` | `e85b4482dfe64e028007ea5b0f319768` | 96 (117 tiras) | **519,6 s** (459,6 s) | 1 749,4 / **3 236,0 MB** | 768,9 MB | 6 729,0 / 7 855,9 MB | 202/202 `semantic_clean`, 0 resíduos | **MEDIDO** |
+| WEBTOON | Espanhol (`es`) | `qualidade` | `92166c0cdb5f42b88feae619b3f601d1` | 62 (120 tiras) | **346,4 s** (**295,0 s**) | 1 452,2 / **2 890,2 MB** | 812,1 MB | 5 559,2 / 6 460,5 MB | 86/86 `semantic_clean` (83 renderizados) | **MEDIDO** |
+| MangaDex | Japonês (`ja`) | `qualidade` | `db424ecfedb441b297caf8285bf7e881` | 20 (`4093×2894`, 11,85 MP) | **828,8 s** (vs 1 249,3 s base, **-420,5 s**) | 3 161,8 / **5 755,3 MB** (vs 8 170 MB base) | **0,0 MB** | 6 844,2 / 7 484,8 MB | 122/122 `semantic_clean`, 0 rejeitados | **MEDIDO** |
+| Comix | Inglês (`en`) | `qualidade` | `7df154c7f6b04011bbe2dbe113660de1` | 20 | **556,7 s** (pré-otimização de gap re-OCR) | 2 070,9 / **3 284,1 MB** | 1 395,2 MB | 6 367,4 / 7 251,6 MB | 141/145 renderizados, 22 SFX preservados | **MEDIDO** |
+| Tapas | Inglês (`en`) | `qualidade` | `05d4a3faeb0a41ceb52089284533e46a` | 45 | **276,7 s** (**4min36s**) | 1 578,3 / **2 565,8 MB** | 1 372,4 MB | 5 718,2 / 6 638,2 MB | 42/42 `semantic_clean`, 16 SFX preservados | **MEDIDO** |
+| INKR | Inglês (`en`) | `qualidade` | `ac96d2269b5e438ea40ecf5070124b88` | 31 | **682,0 s** (159 balões densos) | 1 522,9 / **2 271,9 MB** | 1 414,7 MB | 6 092,8 / 6 484,3 MB | 154/159 `semantic_clean`, 150 renderizados | **MEDIDO** |
+| Vortex Scans | Inglês (`en`) | **`leve`** | `e806d99d4d594de8a8787f167c5ac642` | 21 | **162,2 s** (**2min42s**) | **1 130,7 / 2 060,9 MB** | **0,0 MB** | **5 299,2 / 5 648,4 MB** | 43/45 `semantic_clean`, 42/43 `clean` | **MEDIDO** |
 
-- Equilibrado e Qualidade foram medidos nesta máquina (Qualidade é o que o modo automático escolhe aqui desde a
-  correção da leitura de VRAM). A diferença de tempo entre os dois está dentro da variação entre execuções; não há
-  evidência de que um seja mais rápido que o outro.
-- **Leve não foi medido:** uma tentativa com `HARDWARE_PROFILE=leve` exportado no shell não chegou ao worker
-  supervisionado, que já estava em execução (o `timing_report.json` registrou o perfil automático), então o número foi
-  descartado. Para forçar um perfil, defina `HARDWARE_PROFILE` no `.env` e reinicie o worker. Um estado de perfil
-  herdado de outro processo agora é recalculado quando `HARDWARE_PROFILE` muda. Uma variável explícita do perfil
-  (por exemplo `PIPELINE_PAGE_WORKERS` no `.env`) continua vencendo o valor do perfil e aparece em `overridden_by_env`.
-- "MB em disco por página" inclui os arquivos de trabalho mantidos pelo modo completo (620 MB / 65 páginas).
-- Pico de VRAM não é capturado pelo monitor de recursos nesta versão.
-- Nenhum perfil foi medido em hardware fraco; os requisitos de RAM/VRAM continuam **ESTIMADOS / NÃO HOMOLOGADOS**.
+*(Histórico comparativo anterior de 13/11/2026 no capítulo de referência de 65 páginas lógicas sem monitoramento PDH de VRAM: `equilibrado` = 338 s / 2 777 MB RSS; `qualidade` = 308 s / 2 743 MB RSS.)*
+
+### Orientação de hardware para notebooks mais fracos vs. recomendado
+
+| Faixa | Perfil indicado | Especificação orientativa | Estado de validação |
+|---|---|---|---|
+| **Notebook de entrada / fraco (alvo de teste)** | `HARDWARE_PROFILE=leve` (automático quando RAM < 12 GB ou VRAM dedicada < 3,5 GB) | Windows 10/11 64 bits · CPU x64 4 núcleos / 8 threads · **8 GB de RAM** com SSD (paginação ativa e navegadores pesados fechados; o pipeline mediu **1,13 GB médio / 2,06 GB pico RSS** e **0 MB** de processos filhos de varredura) · GPU integrada DirectX 12 / DirectML ou fallback CPU (mais lento) · ~5 GB livres em disco | **ESTIMADO / `EXTERNAL_GATE`** (falta compilar o `.exe` Windows e medir fisicamente no notebook fraco) |
+| **Intermediário** | `HARDWARE_PROFILE=equilibrado` | Windows 10/11 64 bits · CPU 6 núcleos · **12–16 GB de RAM** · GPU dedicada DirectML com **≥ 4 GB de VRAM** (`LAMA_MAX_INFER_SIDE=768`) · ~8 GB livres em disco | **MEDIDO** em software na máquina de referência; **NÃO HOMOLOGADO** em GPU física de 4 GB |
+| **Recomendado / Referência** | `HARDWARE_PROFILE=qualidade` (`auto`) | Windows 10/11 64 bits · CPU 6 núcleos / 12 threads · **16–32 GB de RAM** (24+ GB ativa `qualidade` automaticamente) · GPU dedicada DirectML com **≥ 8 GB de VRAM** (`LAMA_MAX_INFER_SIDE=896`) · ~10 GB livres em disco | **MEDIDO / `PHYSICALLY_VERIFIED`** em 32 GB RAM + RX 6600 8 GB |
+
+- **Para testar em um notebook mais fraco:** garanta `HARDWARE_PROFILE=auto` (que seleciona `leve` automaticamente abaixo de 12 GB de RAM ou 3,5 GB de VRAM dedicada) ou fixe `HARDWARE_PROFILE=leve` e remova overrides manuais como `PIPELINE_PAGE_WORKERS=2` no `.env` para que `PIPELINE_PAGE_WORKERS=1` entre em vigor (no job `e806d99d`, o `.env` local da máquina de desenvolvimento continha `PIPELINE_PAGE_WORKERS=2`, registrado em `overridden_by_env`; com `PIPELINE_PAGE_WORKERS=1`, o pico de RSS tende a ser ainda menor).

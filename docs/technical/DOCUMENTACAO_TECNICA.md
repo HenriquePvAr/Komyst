@@ -1125,9 +1125,13 @@ tradutor.
   da tradução — pior que o título intacto. Revertido; o título fica preservado até a limpeza
   desse tipo de lettering ser resolvida.
 
-**Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (o provider
-recebe a fala sem contexto); texto escuro com contorno branco sobre arte ainda pode ter máscara
-incompleta na limpeza primária (embora o pós-render agora detecte glifos CJK/cirílicos sobreviventes);
+- **Auditoria em 7 fontes, correção stateful do RapidOCR 3, recorte de containers fechados e perfil `leve` (2026-11-18, IMPLEMENTADO / `PHYSICALLY_VERIFIED`):**
+  - `RapidOCRProfileEngine.__call__` (`komyst/ocr/rapidocr_profiles.py`) passa `use_det=True/False, use_cls=False, use_rec=bool(use_rec)` explicitamente sob `threading.Lock()`, eliminando a mutação permanente `self._engine.use_det = False` do RapidOCR 3 após chamadas `use_det=False`.
+  - `OCREngine._annotate_lines` grava `ocr_lang` em cada `OCRLine`/`TextGroup`, restringindo regras de artefato ASCII/léxico inglês (`score_group_ocr_quality`, `repair_ocr_text`, `split_glued_source_words`, `weak_label_semantic_promotion_allowed`) ao inglês e dobrando os balões traduzidos em espanhol (`43 -> 86` no job `92166c0c`).
+  - `_legible_source_residual` reutiliza o engine OCR do idioma de origem; `_measured_halo_mask` e `_outline_residue_mask` cobrem brilho externo suave (`<= 14 px`) sobre fundo escuro uniforme; `_border_separates` usa 3 cordas (20 %, 50 %, 80 %) para separar balões duplos estrangulados; CJK vertical agrupa múltiplas colunas transitivamente, limita expansão horizontal no ponto médio de balões vizinhos e remove símbolos dingbat sem glifo na fonte.
+  - `_container_text_gap_boxes`, `_lettering_continuation_boxes` e `_recover_adjacent_unread_rows` operam sobre o papel conectado do container e limites reais de tinta dos glifos (até 2 saltos), reduzindo `ocr_selective_fallback` em até 12× e recuperando linhas intermediárias omitidas pelo detector compacto; balões brancos fechados (`light_enclosure_interior`) isolam painéis escuros externos do preenchimento e do LaMa, memoizando tentativas primárias no artefato CLEAN e cacheando métricas FreeType (`@lru_cache`).
+
+**Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (enquanto `context` na Edge Function `translation-execute` aguarda deploy remoto — `EXTERNAL_GATE`); texto escuro com contorno branco sobre arte estruturada ainda pode cair em revisão;
 o catálogo `ocr_models.ensure_model` continua sem chamador de produção.
 
 ## 15. Tradução: abstração de provider
@@ -3140,16 +3144,16 @@ listas `candidates`/`raw_lines` (guardando só o tamanho da página, `page_hw`, 
 `release_group_buffers` (`ocr_balloon.py`) zera os arrays do tamanho da página presos em cada
 grupo. Os `groups` em si permanecem (contabilidade de limpeza, PSD e fingerprint estrutural os leem).
 
-**Perfis de hardware (IMPLEMENTADO).** `komyst/runtime/hardware_profile.py`: `detect()` (RAM via `psutil`,
-VRAM via `nvidia-smi` ou `resource_monitor.detect_gpu_basic`; falha vira `None`), `select_profile(detected, override)`
+**Perfis de hardware (IMPLEMENTADO e MEDIDO em software).** `komyst/runtime/hardware_profile.py`: `detect()` (RAM via `psutil`,
+VRAM via `nvidia-smi`, registro de vídeo Windows de 64 bits `HardwareInformation.qwMemorySize` ou `resource_monitor.detect_gpu_basic`; falha vira `None`), `select_profile(detected, override)`
 e `apply_to_environ()`. `komyst/config/settings.py` chama `apply_to_environ()` logo após `load_local_environment()` e
 antes de qualquer leitura, escrevendo em `os.environ` apenas as chaves do perfil que **não** estão definidas (variável
-explícita vence). O estado (perfil, motivo, detecção, `applied`, `overridden_by_env`) fica em
-`KOMYST_HARDWARE_PROFILE_STATE`, herdado pelos processos filhos (a detecção roda uma vez por árvore de processos),
+explícita vence e é listada em `overridden_by_env`). O estado (perfil, motivo, detecção, `applied`, `overridden_by_env`) fica em
+`KOMYST_HARDWARE_PROFILE_STATE`, herdado pelos processos filhos (recalculado quando `HARDWARE_PROFILE` muda),
 é impresso no log do job (`HARDWARE_PROFILE ...`) e gravado em `timing_report.json` (`hardware_profile`). Em ambiente
 hermético (`KOMYST_HERMETIC_TEST_ENV`) com `HARDWARE_PROFILE=auto` nada é detectado nem aplicado. Valores por perfil
-em [`docs/CONFIGURATION.md`](../CONFIGURATION.md); números medidos por perfil ainda não existem (ver
-[`docs/HARDWARE_PROFILE.md`](../HARDWARE_PROFILE.md)).
+em [`docs/CONFIGURATION.md`](../CONFIGURATION.md) e medições reais por fonte/perfil (incluindo `leve` em 162,2 s / pico de 2 060,9 MB RSS no job `e806d99d`) em
+[`docs/HARDWARE_PROFILE.md`](../HARDWARE_PROFILE.md).
 
 Formato seguro para exemplos em documentação:
 
@@ -3616,6 +3620,7 @@ Otimizações fechadas e verificáveis no repositório:
 | --- | --- | --- |
 | Parada da descoberta de leitor lazy em completude estável | `5fce936` | Episódio 51: 90 rodadas / 92s de sleep → 10 rodadas / 11s, mesmas 171 páginas |
 | Remoção do `optimize=True` do PNG no Smart Split | `2638844` | Estágio 51,98s → 28,52s; encode 32,22s → 8,40s; saída +1,32% bytes; 100/100 páginas pixel-idênticas |
+| Render/validação por ROI + PDF em streaming + buckets DirectML LaMa + corte de re-OCR fora do papel de container + memoização CLEAN + cache tipográfico | `c9eea5f`..`ee005af` | MangaDex 12 MP (20 págs): 1 249,3 s / 8 170 MB → **828,8 s / 5 755,3 MB** (`db424ecf`); Naver KO (96 págs): >700 s falha → **519,6 s** (`e85b4482`); WEBTOON ES (62 págs): **346,4 s** (`92166c0c`, 295,0 s pipeline); Tapas EN (45 págs): **276,7 s** (`05d4a3fa`); Vortex EN perfil `leve` (21 págs): **162,2 s / 2 060,9 MB** (`e806d99d`) |
 
 Classe **Full** ponta a ponta, conforme as missões de performance que precederam este
 commit: **~405,82s (~6min46s)** contra a classe histórica de **~489,73s** — melhoria de

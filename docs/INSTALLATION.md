@@ -21,7 +21,7 @@ Guia de desenvolvimento do Komyst para Windows 64 bits com Python 3.11.
 | Git | Versão recente | Usado para clonar e atualizar o repositório |
 | Google Chrome | Versão recente | **Opcional/fallback.** A descoberta de fonte é HTTP-first; o Chrome só é iniciado quando esse caminho não se aplica à fonte |
 | Node.js | 24 | **Somente desenvolvimento**: suítes de frontend `.mjs` e serviço Better Auth. O pipeline não precisa dele |
-| Memória | 16 GB recomendados | Modelos de OCR e reconstrução podem elevar bastante o uso de RAM e memória virtual |
+| Memória | 16 GB recomendados (8 GB em SSD via perfil `leve` — estimativa não homologada em hardware fraco) | O modo automático seleciona `HARDWARE_PROFILE=leve` abaixo de 12 GB de RAM ou sem GPU dedicada de 4+ GB (pico medido da árvore do pipeline em `leve`: ~2,06 GB RSS; ver [Perfil de hardware](HARDWARE_PROFILE.md)) |
 | Disco | Espaço para modelos, caches e outputs | Capítulos completos podem gerar muitos arquivos intermediários |
 | Conta Komyst | login Supabase + licença Beta | Jobs com tradução passam sempre pelo backend autenticado (`komyst_backend`); a chave DeepL é segredo do servidor, não do cliente |
 

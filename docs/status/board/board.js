@@ -4,7 +4,7 @@
 window.BOARD = {
   title: 'Komyst · Quadro',
   subtitle: 'Komyst',
-  updatedAt: '2026-11-17',
+  updatedAt: '2026-11-18',
   repoUrl: 'https://github.com/HenriquePvAr/Komyst',
   defaultBranch: 'main',
   columns: [
@@ -27,6 +27,22 @@ window.BOARD = {
     none:   'sem código',
   },
   cards: [
+    {
+      id: 'STAGE5-7SOURCES-SPEED-LEVE-20261118',
+      title: 'Etapa 5 — Auditoria visual/semântica nas 7 fontes (KO/ES/JA/EN), aceleração de OCR/CLEAN/tipografia e medição real do HARDWARE_PROFILE=leve',
+      domain: 'pipeline',
+      column: 'dev',
+      env: 'branch',
+      updated: '2026-11-18',
+      summary: 'Corrige mutação stateful use_det=False no RapidOCR 3; propaga ocr_lang para isolar heurísticas inglesas do espanhol/francês; agrupa CJK vertical multicoluna com contenção de vizinhos e filtro de dingbats; isola balões brancos fechados contra vazamento de painéis escuros no CLEAN/LaMa; recupera linhas intermediárias por limites reais de tinta (2 saltos); corta re-OCR fora do papel de container; memoiza CLEAN primário e cacheia FreeType/fontes; ajusta e mede HARDWARE_PROFILE=leve.',
+      risk: 'PHYSICALLY_VERIFIED nas 7 fontes suportadas (commits 452c50f..ee005af em origin/dev, Forçar reprocessamento ON, sem cache): Naver KO job e85b4482 (96 págs, 519,6 s total / 459,6 s pipeline, 202/202 semantic_clean, 0 resíduos); WEBTOON ES job 92166c0c (62 págs, 346,4 s total / 295,0 s pipeline, 86/86 semantic_clean, 2,02x mais balões que base 7fcbc9d5); MangaDex JA job db424ecf (20 págs 12 MP, 828,8 s vs 1249,3 s base [-420,5 s], RSS pico 8170 -> 5755,3 MB, 122/122 semantic_clean); Comix EN job 7df154c7 (20 págs, 141/145 renderizados); Tapas EN job 05d4a3fa (45 págs, 276,7 s [4min36s], RSS pico 2565,8 MB, 42/42 semantic_clean); INKR EN job ac96d226 vs 07b2cd9c (31 págs densas, pre_translation 155,1 -> 107,8 s, 154/159 semantic_clean, balões brancos preservados em painéis escuros); Vortex Scans EN HARDWARE_PROFILE=leve job e806d99d (21 págs, 162,2 s [2min42s], RSS médio 1130,7 MB / pico 2060,9 MB, filhos 0 MB, 42/43 clean, 43/45 semantic_clean). EXTERNAL_GATE: compilação Windows .exe e homologação física em notebook fraco real (8 GB RAM / iGPU) + deploy remoto de translation-execute.',
+      blockedBy: 'EXTERNAL_GATE: empacotamento Windows (.exe) e teste físico em notebook de entrada (8 GB RAM / vídeo integrado); deploy remoto opcional de supabase/functions/translation-execute para ativar context na DeepL.',
+      delivered: [
+        '7/7 fontes validadas fisicamente (Naver KO, WEBTOON ES, MangaDex JA, Comix EN, Tapas EN em 4min36s, INKR EN, Vortex EN perfil leve em 2min42s)',
+        'Correções visuais e de OCR/tradução sem nenhum hardcode por obra (RapidOCR use_det lock, halo/glow escuro, balão duplo 8, CJK vertical, balão branco em painel escuro, recuperação 2-saltos de linhas omitidas, clíticos/vocativos e ordinais)',
+        'Perfil leve calibrado e medido (1130,7 MB RSS médio / 2060,9 MB pico, 0 MB filhos, LAMA_MAX_INFER_SIDE=576) + documentação sincronizada'
+      ]
+    },
     {
       id: 'STAGE4-CONTEXT-FIDELITY-DOCS-20261117',
       title: 'Etapa 4 — Contexto DeepL, retry idempotente em wallet-reserve, fidelidade/ruído multilíngue e revisão documental',

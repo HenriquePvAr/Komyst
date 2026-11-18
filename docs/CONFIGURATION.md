@@ -125,16 +125,12 @@ O seletor de provider da UI (`#translationProviderField`) está oculto; o único
 
 O fallback não substitui palavras por regras fixas. Ele pede novas leituras e compara candidatos. Ajustar thresholds pode aumentar custo, falsos positivos ou risco visual; mantenha os defaults até ter uma regressão reproduzível.
 
-**Cache opcional de modelos OCR por idioma:** o catálogo e o helper de cache existem, mas o pipeline ainda não carrega um modelo de reconhecimento diferente por idioma. Definir esta variável, por si só, não altera o OCR usado:
+**Modelos RapidOCR por idioma (`komyst/ocr/rapidocr_profiles.py`):** o pipeline seleciona automaticamente o perfil ONNX/DirectML pelo idioma de origem escolhido (`ko` → PP-OCRv5 mobile korean; `ja`/`zh` → PP-OCRv6 manga; `en`/`es` → PP-OCRv6 tiny por padrão, com `OCR_ENGLISH_PROFILE=bundled` para voltar ao modelo embutido em inglês; `fr` → PP-OCRv5 mobile latin; `ru` → PP-OCRv5 mobile eslav):
 
 | Variável | Default | Finalidade |
 | --- | --- | --- |
-| `KOMYST_OCR_MODELS_DIR` | `~/.komyst/ocr_models` | Diretório de cache dos modelos PaddleOCR de reconhecimento para idiomas não-ingleses (japonês, coreano, chinês simplificado, cirílico, latino). Gerenciado por `komyst/ocr/ocr_models.py`. |
-
-O modelo inglês é embutido no `rapidocr_onnxruntime` e não requer download. Embora exista um
-helper para modelos adicionais, o pipeline de produção ainda não o chama. Além disso, os hashes
-do catálogo não estão preenchidos; não conte com download ou validação desses modelos até que
-essa integração seja concluída.
+| `KOMYST_OCR_MODELS_DIR` | `<user_data>/models/rapidocr` (`runtime_paths.models_root()/rapidocr`) | Raiz opcional de override dos modelos ONNX por idioma (`v5_mobile`, `ppocrv6_manga`, `v6`). Quando um arquivo de perfil não está presente localmente, o engine registra `OCR_PROFILE_FALLBACK` uma única vez e usa o modelo RapidOCR empacotado. |
+| `OCR_ENGLISH_PROFILE` | `ppocrv6_tiny` (só no código) | Perfil usado quando o idioma original é inglês (`ppocrv6_tiny` ou `bundled`). |
 
 ## Downloader e Selenium
 
@@ -189,7 +185,7 @@ confiança. Usa DirectML (sob `DIRECTML_LOCK`) com CPU de reserva.
 
 `PIPELINE_PAGE_WORKERS` (só no código, default `auto`): quantas páginas são analisadas,
 pré-renderizadas e renderizadas ao mesmo tempo. `auto` usa um terço dos núcleos lógicos e uma
-página por ~3 GB de memória livre, no máximo 4; valores explícitos de `1` a `4` são aceitos.
+página por ~3 GB de memória livre, no máximo 4, reduzindo automaticamente o teto para `2` em páginas ≥ 6 MP e `1` em páginas ≥ 10 MP (`_auto_page_workers`); valores explícitos de `1` a `4` são aceitos.
 
 Nesta instalação, `PIPELINE_PAGE_WORKERS=2` foi aplicado em 08/11/2026 após replay
 de 65 páginas: 31,95% menos tempo em preflight/render/escrita, com as 130 imagens
@@ -216,20 +212,16 @@ job; as regiões seguintes seguem a escada sem FLUX e vão para revisão. O FLUX
 `DIRECTML_LOCK` compartilhado (um lock próprio fez LaMa/OCR competirem pela memória da GPU).
 
 Varredura residual do Paddle: `OCR_RESIDUAL_SWEEP_MODE` (`always`, padrão, ou `off`; `OCR_RESIDUAL_SWEEP=0`
-também desliga). Não existe modo `evidence`: um filtro barato sem modelo não separa páginas com resíduo das
-demais sem perder detecções (medido em dois capítulos de referência). Se o Paddle não inicia, o relatório de
+também desliga). A varredura usa `PaddleOCR(lang="en")` e só executa quando o idioma de origem é inglês (`source_is_english`); nos demais idiomas registra `residual_sweep_status: not_applicable` sem abrir subprocesso Paddle. Não existe modo `evidence`: um filtro barato sem modelo não separa páginas com resíduo das
+demais sem perder detecções (medido em dois capítulos de referência). Se o Paddle não inicia no inglês, o relatório de
 qualidade registra `residual_sweep_status: unavailable` com o motivo, e a página não conta como varrida.
 
 Perfil de hardware: `HARDWARE_PROFILE=auto|leve|equilibrado|qualidade` (padrão `auto`). O perfil só fornece
-**padrões**: variável de ambiente (ou `.env.local`) já definida sempre vence. Valores aplicados: Leve —
-`PIPELINE_PAGE_WORKERS=1`, `OCR_RESIDUAL_SWEEP_MODE=off`, `CLEAN_COMPARE_FILLS=0`, `ADVANCED_ART_INPAINTING=1`;
-Equilibrado — workers `2`, varredura `always`, `CLEAN_COMPARE_FILLS=1`; Qualidade — workers no `auto` existente,
-varredura `always`, `CLEAN_COMPARE_FILLS=1`. `GENERATIVE_INPAINT_ENABLED` nunca é ligado por perfil. Escolha
-automática (RAM total / VRAM dedicada): Qualidade ≥ 24 GB e ≥ 8 GB; Equilibrado ≥ 12 GB e ≥ 4 GB; senão Leve. RAM ou
-GPU não medidas (sem `psutil`, sem GPU dedicada) resultam em Leve. A VRAM vem de `nvidia-smi` e, na falta dele, de
-`detect_gpu_basic` (o `AdapterRAM` do Windows satura em 4 GB: placas AMD grandes podem cair em Equilibrado; force
-`HARDWARE_PROFILE=qualidade` se for o caso). O perfil e o motivo vão para o log do job (`HARDWARE_PROFILE ...`) e
-para `timing_report.json` (chave `hardware_profile`). Detalhes: [`HARDWARE_PROFILE.md`](HARDWARE_PROFILE.md).
+**padrões**: variável de ambiente (ou `.env` / `.env.local`) já definida sempre vence e aparece em `overridden_by_env`. Valores aplicados:
+- `leve`: `PIPELINE_PAGE_WORKERS=1`, `OCR_RESIDUAL_SWEEP_MODE=off`, `CLEAN_COMPARE_FILLS=0`, `CLEAN_SURFACE_FILL=0`, `FONT_RASTER_MATCH=0`, `LAMA_MAX_INFER_SIDE=576`, `ADVANCED_ART_INPAINTING=1`;
+- `equilibrado`: `PIPELINE_PAGE_WORKERS=2`, `OCR_RESIDUAL_SWEEP_MODE=always`, `CLEAN_COMPARE_FILLS=1`, `LAMA_MAX_INFER_SIDE=768`, `ADVANCED_ART_INPAINTING=1`;
+- `qualidade`: workers no `auto` existente, `OCR_RESIDUAL_SWEEP_MODE=always`, `CLEAN_COMPARE_FILLS=1`, `LAMA_MAX_INFER_SIDE=896`, `ADVANCED_ART_INPAINTING=1`.
+`GENERATIVE_INPAINT_ENABLED` nunca é ligado por perfil. Escolha automática (RAM total / VRAM dedicada): `qualidade` ≥ 24 GB e ≥ 7,5 GB; `equilibrado` ≥ 12 GB e ≥ 3,5 GB; senão `leve`. RAM ou GPU não medidas (sem `psutil`, sem GPU dedicada) resultam em `leve`. A VRAM vem de `nvidia-smi`, do tamanho de 64 bits no registro de vídeo do Windows (`HardwareInformation.qwMemorySize`) e, apenas em último caso, de `detect_gpu_basic`. O perfil e o motivo vão para o log do job (`HARDWARE_PROFILE ...`) e para `timing_report.json` (chave `hardware_profile`). Detalhes e medições reais: [`HARDWARE_PROFILE.md`](HARDWARE_PROFILE.md).
 
 `FONT_PATH` também é suportada fora do template. Quando vazia, o código usa a resolução de fonte existente; quando definida, deve apontar para um arquivo local válido.
 
