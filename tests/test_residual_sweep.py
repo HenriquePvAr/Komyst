@@ -225,3 +225,19 @@ def test_unavailable_paddle_is_reported_with_its_reason():
         assert sweep_unavailable_reason() == "spawn_failed:boom"
     with mock.patch("komyst.ocr.subprocess_ocr._gateway", None):
         assert sweep_unavailable_reason() == ""
+
+
+def test_non_english_pages_skip_english_paddle_residual_sweep():
+    image = np.zeros((60, 100, 3), dtype=np.uint8)
+    with mock.patch("komyst.ocr.subprocess_ocr._ensure_gateway") as gateway:
+        assert sweep_page_residuals(image, [], page_index=1, ocr_lang="ko") == []
+        assert sweep_page_residuals(image, [], page_index=1, ocr_lang="1") == []
+        assert sweep_page_residuals(image, [], page_index=1, ocr_lang="es") == []
+        state = {"index": 2, "original_bgr": image, "groups": [], "raw_lines": []}
+        result = PreTranslationPageResult(page_index=2, groups=(), page_state=state, analyzable=True)
+        updated = pipeline._auto_fix_residual_sfx(result, state, ocr_lang="2")
+    gateway.assert_not_called()
+    assert updated.page_state["residual_sweep_status"] == {
+        "status": "not_applicable",
+        "reason": "non_english_source",
+    }

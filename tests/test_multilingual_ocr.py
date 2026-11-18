@@ -86,3 +86,67 @@ def test_vertical_column_width_sets_the_font_size_above_the_global_cap():
     group = ob.TextGroup(group_id="G", lines=[column], text=column.text, translation="Não sei")
     ob._draw_group_translation(image.copy(), group, font_path=None, source_bgr=image)
     assert group.font_size > config.MAX_FONT_SIZE  # sized from the 120 px column, not capped at the default
+
+
+def test_russian_and_french_profiles_and_canonical_models_root(tmp_path, monkeypatch):
+    from komyst.runtime import runtime_paths
+
+    assert rp.normalize_lang("ru") == "ru" and rp.normalize_lang("fr") == "fr"
+    monkeypatch.delenv("KOMYST_OCR_MODELS_DIR", raising=False)
+    rapid_dir = tmp_path / "models" / "rapidocr"
+    v5 = rapid_dir / "v5_mobile"
+    v5.mkdir(parents=True)
+    monkeypatch.setattr(runtime_paths, "models_root", lambda: tmp_path / "models")
+    assert rp.models_root() == rapid_dir
+    for name in ("ch_PP-OCRv5_det_mobile.onnx", "eslav_PP-OCRv5_rec_mobile.onnx", "latin_PP-OCRv5_rec_mobile.onnx"):
+        (v5 / name).write_bytes(b"x")
+    assert rp.profile_for("ru").name == "ppocrv5_mobile_eslav"
+    assert rp.profile_for("fr").name == "ppocrv5_mobile_latin"
+
+
+def test_non_english_prose_is_eligible_for_learned_last_resort_cleanup():
+    for text in (
+        "백표아이의 성별을 몰라?",
+        "あの涙の跡―何か精神的なショック",
+        "ПРИВЕТ, МИР! ЭТО ТЕСТ.",
+        "¡¿QUÉ ESTÁS HACIENDO AQUÍ?!",
+    ):
+        line = _line(text, (20, 20, 180, 60))
+        group = ob.TextGroup(group_id="G", lines=[line], text=text, classification="speech", translation="Tradução")
+        assert ob._last_resort_allowed(group) is True, f"expected last resort allowed for {text!r}"
+
+    sign_line = _line("ASSISTANCE", (20, 20, 180, 60))
+    sign_group = ob.TextGroup(group_id="S", lines=[sign_line], text="ASSISTANCE", classification="speech", translation="Assistência")
+    assert ob._last_resort_allowed(sign_group) is False
+
+
+def test_english_glued_word_splitter_preserves_non_english_latin_words():
+    spanish = "CONTIGO ESTAREMOS SIEMPRE, HERMANO."
+    assert ob.split_glued_source_words(spanish, ocr_lang="es") == spanish
+    assert ob.split_glued_source_words("WEPLANTO STAY", ocr_lang="en") == "WE PLAN TO STAY"
+
+
+def test_post_render_source_text_check_catches_surviving_cjk_glyphs(monkeypatch):
+    class FakeEngine:
+        def __init__(self, lang, **_kw):
+            self.lang = lang
+
+        def _detect_with_rapidocr(self, _crop):
+            if self.lang == "ja":
+                return [_line("癒えた", (4, 4, 30, 80))]
+            return [_line("Mas cicatrizou", (10, 10, 120, 30))]
+
+    monkeypatch.setattr(ob, "OCREngine", FakeEngine)
+    src_line = _line("癒えたけど", (10, 10, 40, 120))
+    group = ob.TextGroup(
+        group_id="G1",
+        lines=[src_line],
+        text="癒えたけど",
+        classification="speech",
+        translation="Mas cicatrizou",
+    )
+    group.safe_area = (10, 10, 140, 140)
+    rendered = np.full((200, 200, 3), 255, dtype=np.uint8)
+    summary = ob._post_render_source_text_check(rendered, group, page_index=6, original_bgr=rendered)
+    assert summary["passed"] is False
+    assert summary["residual_source_tokens"]

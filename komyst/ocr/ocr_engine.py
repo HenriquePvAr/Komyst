@@ -742,11 +742,31 @@ class OCREngine:
         return self._paddle_instances[cache_key]
 
     def _get_rapidocr(self):
-        from komyst.ocr.rapidocr_profiles import RapidOCRProfileEngine, profile_for
+        from komyst.ocr.rapidocr_profiles import (
+            RapidOCRProfileEngine,
+            expected_profile_name,
+            models_root,
+            profile_for,
+        )
 
         # The source language reads with the model that read it best (Korean, Japanese,
-        # Chinese, optionally English); without one, the bundled RapidOCR model.
-        profile = profile_for(self.lang_choice, str(getattr(config, "OCR_ENGLISH_PROFILE", "") or ""))
+        # Chinese, Russian, French, Spanish, optionally English); without one, the bundled model.
+        eng_prof = str(getattr(config, "OCR_ENGLISH_PROFILE", "") or "")
+        profile = profile_for(self.lang_choice, eng_prof)
+        if profile is None:
+            expected = expected_profile_name(self.lang_choice, eng_prof)
+            warned = getattr(type(self), "_warned_missing_profiles", None)
+            if warned is None:
+                warned = set()
+                type(self)._warned_missing_profiles = warned
+            warn_key = f"{self.lang_choice}:{expected}"
+            if expected and warn_key not in warned:
+                warned.add(warn_key)
+                print(
+                    f"OCR_PROFILE_FALLBACK lang={self.lang_choice} expected={expected} "
+                    f"root={models_root()} reason=missing_model_files",
+                    flush=True,
+                )
         if profile is not None:
             if profile.name not in self._rapidocr_instances:
                 with self._rapidocr_init_lock:

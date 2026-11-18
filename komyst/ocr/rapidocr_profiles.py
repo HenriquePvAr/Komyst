@@ -31,6 +31,8 @@ _LANG_ALIASES = {
     "zh": "zh", "ch": "zh", "chinese": "zh", "chines": "zh",
     "3": "en", "en": "en", "eng": "en", "ingles": "en",
     "es": "es", "spa": "es", "spanish": "es", "espanhol": "es", "latin": "es",
+    "ru": "ru", "rus": "ru", "russian": "ru", "russo": "ru", "cyrillic": "ru",
+    "fr": "fr", "fra": "fr", "french": "fr", "frances": "fr",
 }
 
 
@@ -74,6 +76,18 @@ def _profile(lang: str, english_profile: str) -> Profile | None:
     if lang in {"ja", "zh"}:
         return Profile("ppocrv6_manga", "ppocrv6_manga",
                        ("det/manga_det.onnx", "rec/manga_rec.onnx", "ppocrv6_dict.txt"), {})
+    if lang == "ru":
+        return Profile("ppocrv5_mobile_eslav", "v5_mobile",
+                       ("ch_PP-OCRv5_det_mobile.onnx", "eslav_PP-OCRv5_rec_mobile.onnx"),
+                       {"Det.ocr_version": OCRVersion("PP-OCRv5"), "Det.model_type": ModelType("mobile"),
+                        "Rec.ocr_version": OCRVersion("PP-OCRv5"), "Rec.model_type": ModelType("mobile"),
+                        "Rec.lang_type": LangRec("eslav")})
+    if lang == "fr":
+        return Profile("ppocrv5_mobile_latin", "v5_mobile",
+                       ("ch_PP-OCRv5_det_mobile.onnx", "latin_PP-OCRv5_rec_mobile.onnx"),
+                       {"Det.ocr_version": OCRVersion("PP-OCRv5"), "Det.model_type": ModelType("mobile"),
+                        "Rec.ocr_version": OCRVersion("PP-OCRv5"), "Rec.model_type": ModelType("mobile"),
+                        "Rec.lang_type": LangRec("latin")})
     if lang == "es" or (lang == "en" and english_profile == "ppocrv6_tiny"):
         return Profile("ppocrv6_tiny", "v6",
                        ("PP-OCRv6_det_tiny.onnx", "PP-OCRv6_rec_tiny.onnx"),
@@ -84,7 +98,39 @@ def _profile(lang: str, english_profile: str) -> Profile | None:
 
 
 def models_root() -> Path:
-    return ocr_models.models_dir() / "rapidocr"
+    import os
+    from komyst.runtime import runtime_paths
+
+    env_val = os.environ.get("KOMYST_OCR_MODELS_DIR", "").strip()
+    if env_val:
+        explicit = Path(env_val).expanduser()
+        return explicit / "rapidocr" if (explicit / "rapidocr").is_dir() else explicit
+
+    canonical = runtime_paths.models_root() / "rapidocr"
+    if os.environ.get("KOMYST_RUNTIME_ISOLATION_GUARD") == "1" or canonical.is_dir():
+        return canonical
+    try:
+        eval_dir = runtime_paths.default_user_data_root() / "models_eval"
+        if eval_dir.is_dir():
+            return eval_dir
+    except RuntimeError:
+        pass
+    legacy = ocr_models.models_dir() / "rapidocr"
+    if legacy.is_dir():
+        return legacy
+    return canonical
+
+
+def expected_profile_name(choice: str, english_profile: str = "") -> str:
+    """Name of the dedicated profile configured for ``choice`` (even if files are absent)."""
+    lang = normalize_lang(choice)
+    if not lang:
+        return ""
+    try:
+        profile = _profile(lang, english_profile)
+    except ImportError:
+        return ""
+    return profile.name if profile is not None else ""
 
 
 def profile_for(choice: str, english_profile: str = "") -> Profile | None:

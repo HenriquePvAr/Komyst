@@ -1641,7 +1641,14 @@ def _drop_stroke_artifacts(text):
     return re.sub(r"\s{2,}", " ", _STROKE_TOKEN.sub("", text)).strip()
 
 
-def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words=frozenset()):
+def split_glued_source_words(
+    text,
+    protected=(),
+    chapter_names=(),
+    chapter_words=frozenset(),
+    *,
+    ocr_lang: str = "en",
+):
     """``text`` with OCR-damaged tokens repaired before translation.
 
     Three repairs, each only when it is clear, in this order:
@@ -1656,6 +1663,10 @@ def split_glued_source_words(text, protected=(), chapter_names=(), chapter_words
     A wide shout the detector cut into scraps ("A WE SO ME!") is joined first when the
     scraps spell one frequent word.
     """
+    from komyst.ocr import ocr_models
+
+    if not ocr_models.source_is_english(ocr_lang):
+        return str(text or "")
     text = _SHATTERED_WORD.sub(_join_shattered_word, str(text or ""))
     text = _drop_stroke_artifacts(text)
     protected_keys = {_name_token_of(name) for name in protected or ()}
@@ -2474,6 +2485,25 @@ _LAST_RESORT_ART_REASONS = frozenset({
 })
 
 
+_CJK_PROSE_CHAR_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+_CYRILLIC_WORD_RE = re.compile(r"[\u0400-\u04ff]{2,}")
+_NON_ASCII_LATIN_MARK_RE = re.compile(r"[áéíóúñüÁÉÍÓÚÑÜ¿¡àèìòùâêîôûçœÀÈÌÒÙÂÊÎÔÛÇŒ]")
+
+
+def _has_non_english_prose_evidence(text: str) -> bool:
+    """True when CJK, Cyrillic, or accented Latin text shows real dialogue/narration structure."""
+    if len(_CJK_PROSE_CHAR_RE.findall(text)) >= 2:
+        return True
+    cyr_words = _CYRILLIC_WORD_RE.findall(text)
+    if len(cyr_words) >= 2 or (len(cyr_words) == 1 and len(cyr_words[0]) >= 4 and re.search(r"[.!?,…?!]", text)):
+        return True
+    if _NON_ASCII_LATIN_MARK_RE.search(text):
+        latin_words = [w for w in re.findall(r"[^\W\d_]+", text, flags=re.UNICODE) if len(w) >= 2]
+        if len(latin_words) >= 2 and (re.search(r"[.!?,…¿¡?!]", text) or len(latin_words) >= 3):
+            return True
+    return False
+
+
 def _last_resort_allowed(group):
     """Readable prose or an identified sound may use the learned last resort.
 
@@ -2502,16 +2532,18 @@ def _last_resort_allowed(group):
         words.extend(region_taxonomy.segment_words(token) or [token])
     real = [w for w in words if region_taxonomy.is_english_word(w)
             or w.upper() in region_taxonomy._STORY_CLAUSE_MARKERS]
-    sentence = len(real) >= 2 and (
-        re.search(r"[.!?,…]", text)
-        # The OCR often drops the dots of "...his kinetic vision and his explosive power.";
-        # four real words that make up most of the text are prose, not a sign or a credit.
-        or (len(real) >= 4 and len(real) >= 0.7 * len(words))
-        or any(w.upper() in region_taxonomy._STORY_CLAUSE_MARKERS for w in words)
-        or _decorative_textured_story_promotion_allowed(group)
-        or _decorative_short_display_story_promotion_allowed(group)
-        or _legible_sentence_promotion_allowed(group)
-    )
+    sentence = (
+        len(real) >= 2 and (
+            re.search(r"[.!?,…]", text)
+            # The OCR often drops the dots of "...his kinetic vision and his explosive power.";
+            # four real words that make up most of the text are prose, not a sign or a credit.
+            or (len(real) >= 4 and len(real) >= 0.7 * len(words))
+            or any(w.upper() in region_taxonomy._STORY_CLAUSE_MARKERS for w in words)
+            or _decorative_textured_story_promotion_allowed(group)
+            or _decorative_short_display_story_promotion_allowed(group)
+            or _legible_sentence_promotion_allowed(group)
+        )
+    ) or _has_non_english_prose_evidence(text)
     return bool(_group_has_story_translation_authority(group) and sentence)
 
 
@@ -9322,12 +9354,21 @@ def _recover_adjacent_unread_rows(original_bgr, lines, ocr_lang, page_index=None
                    min(width, rx2 + pad) - max(0, rx1 - pad), min(height, ry2 + pad) - max(0, ry1 - pad))
             read = _recognize_single_row(
                 engines[0], original_bgr[box[1]:box[1] + box[3], box[0]:box[0] + box[2]], page_index)
+            from komyst.ocr import ocr_models
+
             text = clean_ocr_text(read[0].text) if read else ""
-            words = re.findall(r"[A-Za-z']+", text)
-            if not (read and float(read[0].confidence) >= 0.6 and words
+            if ocr_models.source_is_english(ocr_lang):
+                words = re.findall(r"[A-Za-z']+", text)
+                valid_row = bool(
+                    read and float(read[0].confidence) >= 0.6 and words
                     and sum(len(re.sub(r"[^A-Za-z]", "", word)) for word in words) >= 2
                     and all(is_english_word(word.replace("'", "")) or word_zipf(word.replace("'", "")) >= 3.0
-                            for word in words)):
+                            for word in words)
+                )
+            else:
+                letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
+                valid_row = bool(read and float(read[0].confidence) >= 0.70 and len(letters) >= 2)
+            if not valid_row:
                 continue
             recovered.append(OCRLine(text=text, confidence=float(read[0].confidence),
                                      polygon=_polygon_from_box(box), box=box, raw_text=read[0].text,
@@ -20080,6 +20121,36 @@ def _source_removal_incomplete(group, removal):
     return _source_removal_status(group, removal) != SOURCE_REMOVAL_VERIFIED
 
 
+_POST_RENDER_OCR_CACHE: dict[str, OCREngine] = {}
+_HANGUL_SCRIPT_RE = re.compile(r"[\uac00-\ud7af]")
+_JA_ZH_SCRIPT_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+_CYRILLIC_SCRIPT_RE = re.compile(r"[\u0400-\u04ff]")
+_NON_LATIN_SCRIPT_CHARS_RE = re.compile(
+    r"[\u3040-\u309f\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\u0400-\u04ff]"
+)
+
+
+def _script_lang_for_text(text: str) -> str:
+    raw = str(text or "")
+    if _HANGUL_SCRIPT_RE.search(raw):
+        return "ko"
+    if _JA_ZH_SCRIPT_RE.search(raw):
+        return "ja"
+    if _CYRILLIC_SCRIPT_RE.search(raw):
+        return "ru"
+    return ""
+
+
+def _post_render_ocr_engine(lang: str):
+    use_cache = OCREngine is _CANONICAL_OCR_ENGINE
+    if use_cache and lang in _POST_RENDER_OCR_CACHE:
+        return _POST_RENDER_OCR_CACHE[lang]
+    eng = OCREngine(lang, engine="rapidocr", fallback_engine="")
+    if use_cache:
+        _POST_RENDER_OCR_CACHE[lang] = eng
+    return eng
+
+
 def _post_render_source_text_check(
     rendered_bgr,
     group,
@@ -20160,7 +20231,7 @@ def _post_render_source_text_check(
         }
 
     try:
-        engine = OCREngine("en", engine="rapidocr", fallback_engine="")
+        engine = _post_render_ocr_engine("en")
         lines = engine._detect_with_rapidocr(crop)
     except Exception as exc:
         return {
@@ -20187,6 +20258,24 @@ def _post_render_source_text_check(
         re.findall(r"[A-Z']+", _ascii_fold(final_text).upper())
     )
     residual = set(source_tokens & final_tokens)
+
+    script_lang = _script_lang_for_text(group.text)
+    if script_lang:
+        source_script_chars = set(_NON_LATIN_SCRIPT_CHARS_RE.findall(str(group.text or "")))
+        if source_script_chars:
+            try:
+                script_lines = _post_render_ocr_engine(script_lang)._detect_with_rapidocr(crop)
+            except Exception:  # noqa: BLE001 - optional script profile check
+                script_lines = None
+            if script_lines:
+                confident_script = "".join(
+                    str(getattr(line, "text", "") or "")
+                    for line in script_lines
+                    if float(getattr(line, "confidence", 1.0) or 0.0) >= 0.50
+                )
+                surviving = source_script_chars & set(_NON_LATIN_SCRIPT_CHARS_RE.findall(confident_script))
+                if len(surviving) >= 2 or (len(source_script_chars) <= 3 and len(surviving) >= 1):
+                    residual.add("".join(sorted(surviving)))
 
     # The wide union crop above exists so a source glyph sitting outside the
     # newly drawn text (a bigger source font, a different wrap) still gets

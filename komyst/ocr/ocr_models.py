@@ -152,14 +152,21 @@ def source_is_cjk(lang_choice: str) -> bool:
 def models_dir() -> Path:
     """Diretório onde os modelos OCR por idioma são armazenados.
 
-    Lê KOMYST_OCR_MODELS_DIR; se vazio, usa <user_data>/komyst_ocr_models.
+    Lê KOMYST_OCR_MODELS_DIR; se vazio, usa ``<models_root>/ocr`` (com fallback
+    para o legado ``%APPDATA%/komyst_ocr_models`` apenas se ele já existir).
     """
     env_val = os.environ.get("KOMYST_OCR_MODELS_DIR", "").strip()
     if env_val:
         return Path(env_val)
-    # Fallback: junto ao diretório de dados do usuário padrão
-    data_home = Path(os.environ.get("APPDATA", os.path.expanduser("~")))
-    return data_home / "komyst_ocr_models"
+    from komyst.runtime import runtime_paths
+
+    canonical = runtime_paths.models_root() / "ocr"
+    if os.environ.get("KOMYST_RUNTIME_ISOLATION_GUARD") == "1" or canonical.is_dir():
+        return canonical
+    legacy = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "komyst_ocr_models"
+    if legacy.is_dir():
+        return legacy
+    return canonical
 
 
 def rec_model_for(lang: str) -> ModelEntry | None:

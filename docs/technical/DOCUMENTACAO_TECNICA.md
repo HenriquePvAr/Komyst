@@ -1042,12 +1042,23 @@ tradutor.
   (det/rec + dicionário, `Det.thresh` 0.15 / `box_thresh` 0.25 / `unclip_ratio` 1.5); inglês →
   PP-OCRv6 tiny por padrão (`OCR_ENGLISH_PROFILE=ppocrv6_tiny`; `bundled` volta ao modelo antigo).
   Espanhol (`es`/`latin`) → PP-OCRv6 tiny sempre: num capítulo WEBTOON ES leu 97 acentos/¿¡
-  (o modelo empacotado leu 0), 31 % mais rápido.
+  (o modelo empacotado leu 0), 31 % mais rápido. Russo/cirílico (`ru`) → PP-OCRv5 mobile (det `ch`)
+  + rec `eslav`; francês (`fr`) → PP-OCRv5 mobile (det `ch`) + rec `latin`.
   Medido nas páginas de referência: 28–36 % mais rápido que o modelo empacotado, com espaços
   entre palavras.
-- Modelos em `ocr_models.models_dir()/rapidocr/<pasta>` (`v5_mobile`, `ppocrv6_manga`, `v6`).
-  Arquivo ausente ou `rapidocr` não instalado → `None` → modelo empacotado. O empacotamento dos
-  modelos no instalador **não existe** (PLANEJADO).
+- Modelos em `runtime_paths.models_root()/rapidocr/<pasta>` (`v5_mobile`, `ppocrv6_manga`, `v6`),
+  com override `KOMYST_OCR_MODELS_DIR` e fallback legado; arquivo ausente emite aviso único
+  `OCR_PROFILE_FALLBACK` e usa o modelo empacotado. O empacotamento dos modelos no instalador
+  **não existe** (PLANEJADO).
+- Regras multilíngues no pipeline (`benchmark_pipeline.py`, `residual_sweep.py`, `ocr_balloon.py`):
+  `residual_sweep` e `sfx-paddle-prewarm` (`PaddleOCR(lang="en")`) só rodam quando o idioma de
+  origem é inglês (`source_is_english`), registrando `residual_sweep_status: not_applicable` nos
+  demais idiomas (evita ~120–185 s de CPU e ~1,8–2,1 GB de RSS do worker filho); reparos baseados
+  no léxico inglês (`split_glued_source_words`, `chapter_name_genders`) também ficam restritos ao
+  inglês; `_last_resort_allowed` aceita evidência estrutural de prosa CJK, cirílica e latina
+  acentuada para liberar resgate LaMa em vez de placas opacas; `_post_render_source_text_check`
+  reutiliza instâncias cacheadas de `OCREngine` e verifica sobrevivência de glifos CJK/cirílicos no
+  recorte pós-render.
 - Regras de script em `ocr_balloon.py`: a regra de vogais de `_looks_like_noise` só vale para
   letras latinas; prosa em escrita não latina deixa de ser classificada como SFX
   (`non_latin_script_prose`); colunas verticais CJK (`_vertical_cjk_line`,
@@ -1066,9 +1077,9 @@ tradutor.
   desse tipo de lettering ser resolvida.
 
 **Dívida conhecida:** nomes próprios coreanos/japoneses traduzidos literalmente (o provider
-recebe a fala sem contexto); texto escuro com contorno branco sobre arte pode ficar com
-resíduo, e a validação de remoção o reporta como removido; russo usa o modelo
-empacotado; o catálogo `ocr_models.ensure_model` continua sem chamador de produção.
+recebe a fala sem contexto); texto escuro com contorno branco sobre arte ainda pode ter máscara
+incompleta na limpeza primária (embora o pós-render agora detecte glifos CJK/cirílicos sobreviventes);
+o catálogo `ocr_models.ensure_model` continua sem chamador de produção.
 
 ## 15. Tradução: abstração de provider
 

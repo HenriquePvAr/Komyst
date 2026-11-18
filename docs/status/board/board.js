@@ -28,6 +28,22 @@ window.BOARD = {
   },
   cards: [
     {
+      id: 'MULTILANG-STAGE1-20261117',
+      title: 'Etapa 1 — OCR multilíngue canônico, corte do Paddle fora do inglês e resgate LaMa CJK/ES/RU',
+      domain: 'pipeline',
+      column: 'dev',
+      env: 'branch',
+      updated: '2026-11-17',
+      summary: 'Unifica a raiz de modelos OCR em runtime_paths.models_root()/rapidocr, ativa perfis Russo (PP-OCRv5 eslav) e Francês (PP-OCRv5 latin), desliga residual_sweep/prewarm de Paddle inglês em idiomas não-ingleses, protege palavras latinas não-inglesas contra split_glued_source_words e libera _last_resort_allowed + pós-render para escrita CJK/cirílica/acentuada.',
+      risk: 'TESTED_OFFLINE: 110 testes focados e de regressão passando (test_multilingual_ocr, test_residual_sweep e validadores de resíduo). Probe local confirmou 7/7 perfis resolvidos em DirectML, leitura cirílica real e desbloqueio de 11/11 grupos KO e 9/9 grupos JA que antes caíam em placas brancas. Reexecução física completa de capítulos aguarda autorização por envolver provider pago.',
+      blockedBy: 'Validação física de capítulo completo quando autorizado; próximas etapas cobrem ROI em páginas 12 MP, re-OCR seletivo e VRAM/FLUX.',
+      delivered: [
+        'Perfis RapidOCR para ru (eslav) e fr (latin) + raiz canônica models/rapidocr com log OCR_PROFILE_FALLBACK',
+        'Corte de residual_sweep/prewarm Paddle inglês fora do inglês (-122 a -183 s e -1,8 a -2,1 GB RAM nos jobs JA/KO)',
+        'Resgate LaMa (_last_resort_allowed) e validação pós-render habilitados para CJK, cirílico e prosa latina acentuada'
+      ]
+    },
+    {
       id: 'OCR-EN-DISPLAY-PERF-20261117',
       title: 'OCR inglês, títulos sobre arte e limpeza localizada',
       domain: 'pipeline',

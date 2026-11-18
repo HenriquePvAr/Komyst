@@ -319,13 +319,28 @@ def _residual_sweep_known_boxes(state):
     return boxes
 
 
-def _auto_fix_residual_sfx(page_result, page_state):
+def _auto_fix_residual_sfx(page_result, page_state, ocr_lang: str = "en"):
     """Inject short sweep reads only after normal visual SFX classification."""
+    from komyst.ocr import ocr_models
+
     residual_started = time.perf_counter()
     groups = page_state.get("groups", []) or []
     original = page_state.get("original_bgr")
     if not isinstance(original, np.ndarray) or original.size == 0:
         return page_result
+    if not ocr_models.source_is_english(ocr_lang):
+        page_state["residual_sweep"] = []
+        page_state["residual_sweep_status"] = {
+            "status": "not_applicable",
+            "reason": "non_english_source",
+        }
+        page_state["residual_sweep_auto_fix"] = {
+            "detected": 0, "synthetic_candidates": 0, "accepted": 0,
+        }
+        return replace(
+            page_result, page_state=dict(page_state),
+            timings={**dict(page_result.timings), "residual_sweep": 0.0},
+        )
     detections = sweep_page_residuals(
         original, _residual_sweep_known_boxes(page_state),
         page_index=int(page_state.get("index") or 0),
@@ -443,7 +458,7 @@ def process_pre_translation_pages(
             previous_recorder = ocr_line_provenance.active()
             ocr_line_provenance.activate(result.page_recorder)
             try:
-                result = _auto_fix_residual_sfx(result, dict(result.page_state))
+                result = _auto_fix_residual_sfx(result, dict(result.page_state), ocr_lang=ocr_lang)
             finally:
                 ocr_line_provenance.activate(previous_recorder)
             if result.page_recorder is not None:
@@ -590,7 +605,7 @@ def _source_needs_smart_split(download_report, image_paths):
     return bool((download_report or {}).get("requires_smart_split", True))
 
 
-def _prewarm_learned_inpainter():
+def _prewarm_learned_inpainter(ocr_lang: str = "en"):
     """Build the LaMa DirectML session in the background, after page OCR.
 
     Session creation compiles the graph for the GPU (~12 s) and used to happen in the
@@ -619,16 +634,20 @@ def _prewarm_learned_inpainter():
     thread = threading.Thread(target=load, name="lama-prewarm", daemon=True)
     thread.start()
 
-    def load_sfx_paddle() -> None:
-        try:
-            from komyst.ocr.sfx_region_reocr import prewarm_sfx_paddle
+    from komyst.ocr import ocr_models
+    from komyst.ocr.residual_sweep import sweep_mode
 
-            prewarm_sfx_paddle()
-        except Exception:  # noqa: BLE001 - optional engine, never blocks a job
-            pass
+    if ocr_models.source_is_english(ocr_lang) and sweep_mode() != "off":
+        def load_sfx_paddle() -> None:
+            try:
+                from komyst.ocr.sfx_region_reocr import prewarm_sfx_paddle
 
-    paddle_thread = threading.Thread(target=load_sfx_paddle, name="sfx-paddle-prewarm", daemon=True)
-    paddle_thread.start()
+                prewarm_sfx_paddle()
+            except Exception:  # noqa: BLE001 - optional engine, never blocks a job
+                pass
+
+        paddle_thread = threading.Thread(target=load_sfx_paddle, name="sfx-paddle-prewarm", daemon=True)
+        paddle_thread.start()
     return thread
 
 
@@ -3653,7 +3672,7 @@ def run_benchmark(args):
     )
     # After the reader browser is gone: building the session during the download
     # slowed the Comix canvas reader by ~32 s (A/B 48.8/47.8 s vs 16.4/16.4 s).
-    _prewarm_learned_inpainter()
+    _prewarm_learned_inpainter(ocr_lang=ocr_lang)
 
     for index, result in ocr_results.items():
         state = state_by_index[index]
@@ -3851,18 +3870,21 @@ def run_benchmark(args):
         # ("WEPLANTO", read as a name), a chapter name glued to a token ("ILJEON")
         # and one misread letter the chapter itself attests ("HIPES" -> HIDES).
         # The first pass and every retry then see the same source.
-        chapter_words = chapter_source_words(group.text for group in translation_targets)
-        glue_names = [*detected_names, *chapter_hyphenated_names(
-            group.text for group in all_analyzed_groups),
-            *chapter_recurring_tokens(group.text for group in all_analyzed_groups)]
-        for i in remote_index:
-            group = translation_targets[i]
-            source = str(getattr(group, "canonical_source_text", "") or group.text)
-            split = split_glued_source_words(
-                source, protected=getattr(group, "detected_proper_names", ()),
-                chapter_names=glue_names, chapter_words=chapter_words)
-            if split != source:
-                group.canonical_source_text = split
+        from komyst.ocr import ocr_models
+
+        if ocr_models.source_is_english(ocr_lang):
+            chapter_words = chapter_source_words(group.text for group in translation_targets)
+            glue_names = [*detected_names, *chapter_hyphenated_names(
+                group.text for group in all_analyzed_groups),
+                *chapter_recurring_tokens(group.text for group in all_analyzed_groups)]
+            for i in remote_index:
+                group = translation_targets[i]
+                source = str(getattr(group, "canonical_source_text", "") or group.text)
+                split = split_glued_source_words(
+                    source, protected=getattr(group, "detected_proper_names", ()),
+                    chapter_names=glue_names, chapter_words=chapter_words, ocr_lang=ocr_lang)
+                if split != source:
+                    group.canonical_source_text = split
         remote = translator.translate_many(
             [str(getattr(translation_targets[i], "canonical_source_text", "") or translation_targets[i].text)
              for i in remote_index],
@@ -3900,9 +3922,15 @@ def run_benchmark(args):
     )
     # Portuguese guesses a name's gender from its spelling ("a Asta"); the chapter's own
     # English pronouns decide it instead.
-    name_genders = chapter_name_genders(
-        [group.text for group in all_analyzed_groups],
-        [*detected_names, *chapter_name_candidates([group.text for group in all_analyzed_groups])])
+    from komyst.ocr import ocr_models
+
+    name_genders = (
+        chapter_name_genders(
+            [group.text for group in all_analyzed_groups],
+            [*detected_names, *chapter_name_candidates([group.text for group in all_analyzed_groups])])
+        if ocr_models.source_is_english(ocr_lang)
+        else {}
+    )
     if name_genders and translations:
         translations = [align_name_articles(value, name_genders) if value else value
                         for value in translations]

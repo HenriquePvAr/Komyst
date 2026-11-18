@@ -185,14 +185,18 @@ def sweep_unavailable_reason() -> str:
     return str(getattr(gateway, "unavailable_reason", "") or "")
 
 
-def sweep_page_residuals(original_bgr, known_boxes, page_index=None) -> list[dict]:
+def sweep_page_residuals(original_bgr, known_boxes, page_index=None, *, ocr_lang: str = "en") -> list[dict]:
     """Return undetected source-text regions on this page (read-only report).
 
     Runs Paddle in the isolated subprocess on a downscaled copy of the page
     and keeps reads whose box overlaps no known group. Returns ``[]`` when the
     engine is unavailable - reporting must never block or break a run.
+    The isolated worker loads an English Paddle recogniser and ``synthetic_sfx_lines``
+    only accepts ASCII display tokens, so non-English source languages skip it.
     """
-    if sweep_mode() == "off":
+    from komyst.ocr import ocr_models
+
+    if sweep_mode() == "off" or not ocr_models.source_is_english(ocr_lang):
         return []
     from komyst.ocr.subprocess_ocr import _ensure_gateway
 
