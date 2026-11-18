@@ -286,7 +286,7 @@ def test_english_quantity_ordinals_1s_ocr_speck_and_container_gap_interior_gate(
     cv2.ellipse(page, (150, 140), (95, 75), 0, 0, 360, (15, 15, 15), 4)
     inside_line = _mk_line("HELLO THERE", (95, 115, 110, 36))
     inside_line.metadata = {"visual_white_region_id": 1}
-    gaps = ob._speech_container_gap_boxes(page, [inside_line])
+    gaps = ob._container_text_gap_boxes(page, [inside_line])
     assert gaps == []
 
 
