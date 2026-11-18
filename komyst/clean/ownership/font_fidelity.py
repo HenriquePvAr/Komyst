@@ -264,15 +264,48 @@ def candidate_font_paths(role: str, configured_font_path: str | None = None, *,
     return role_paths + configured if prefer_role else configured + role_paths
 
 
+@functools.lru_cache(maxsize=128)
+def _cached_file_sha256(resolved_path: str, size_bytes: int, mtime_ns: int) -> str:
+    h = hashlib.sha256()
+    with Path(resolved_path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def file_sha256(path: str | Path) -> str:
     try:
-        h = hashlib.sha256()
-        with Path(path).open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        p = Path(path)
+        st = p.stat()
+        return _cached_file_sha256(str(p.resolve()), int(st.st_size), int(st.st_mtime_ns))
     except OSError:
         return ""
+
+
+@functools.lru_cache(maxsize=512)
+def _cached_truetype(resolved_path: str, size: int, mtime_ns: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(resolved_path, int(size))
+
+
+@functools.lru_cache(maxsize=512)
+def _cached_notdef_signature(resolved_path: str, size: int, mtime_ns: int) -> tuple | None:
+    font = _cached_truetype(resolved_path, int(size), mtime_ns)
+    return _mask_signature(font, "􏿽")
+
+
+@functools.lru_cache(maxsize=8192)
+def _cached_char_supported(resolved_path: str, size: int, mtime_ns: int, char: str) -> bool:
+    font = _cached_truetype(resolved_path, int(size), mtime_ns)
+    try:
+        bbox = font.getmask(char).getbbox()
+    except Exception:
+        bbox = None
+    if bbox is None:
+        return False
+    notdef = _cached_notdef_signature(resolved_path, int(size), mtime_ns)
+    if notdef is not None and notdef[1] and _mask_signature(font, char) == notdef:
+        return False
+    return True
 
 
 def _mask_signature(font: ImageFont.ImageFont, char: str) -> tuple | None:
@@ -291,11 +324,24 @@ def _glyph_support(font: ImageFont.ImageFont, text: str) -> dict[str, Any]:
     """
     missing: list[str] = []
     checked: list[str] = []
-    notdef = _mask_signature(font, "􏿽")
+    font_path = getattr(font, "path", None)
+    font_size = getattr(font, "size", None)
+    fast_key = None
+    if isinstance(font_path, (str, Path)) and isinstance(font_size, int):
+        try:
+            p = Path(font_path)
+            fast_key = (str(p.resolve()), int(font_size), int(p.stat().st_mtime_ns))
+        except OSError:
+            fast_key = None
+    notdef = None if fast_key is not None else _mask_signature(font, "􏿽")
     for char in dict.fromkeys(str(text or "")):
         if char.isspace():
             continue
         checked.append(char)
+        if fast_key is not None:
+            if not _cached_char_supported(fast_key[0], fast_key[1], fast_key[2], char):
+                missing.append(char)
+            continue
         try:
             bbox = font.getmask(char).getbbox()
         except Exception:
@@ -320,15 +366,18 @@ def resolve_font(role: str, size: int, *, configured_font_path: str | None = Non
         if not path:
             continue
         try:
-            if Path(path).is_file():
-                font = ImageFont.truetype(path, int(size))
-                identity = Path(path).stem.lower()
+            p = Path(path)
+            if p.is_file():
+                resolved_str = str(p.resolve())
+                mtime_ns = int(p.stat().st_mtime_ns)
+                font = _cached_truetype(resolved_str, int(size), mtime_ns)
+                identity = p.stem.lower()
                 used_configured_fallback = bool(configured_missing and not prefer_role)
                 runtime = {
                     "font_fidelity_version": FONT_FIDELITY_VERSION,
                     "requested_font": requested,
-                    "resolved_font_path": str(Path(path).resolve()),
-                    "font_file_hash": file_sha256(path),
+                    "resolved_font_path": resolved_str,
+                    "font_file_hash": file_sha256(p),
                     "font_load_success": True,
                     "font_load_error": "",
                     "fallback_used": used_configured_fallback,

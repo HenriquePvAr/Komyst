@@ -19,12 +19,28 @@ STATE_ENV = "KOMYST_HARDWARE_PROFILE_STATE"
 # Only the keys a profile changes. GENERATIVE_INPAINT_ENABLED (FLUX) is never set by a profile;
 # "auto" workers = leave PIPELINE_PAGE_WORKERS to the existing auto policy.
 PROFILE_VALUES: dict[str, dict[str, str]] = {
-    "leve": {"PIPELINE_PAGE_WORKERS": "1", "OCR_RESIDUAL_SWEEP_MODE": "off",
-             "CLEAN_COMPARE_FILLS": "0", "ADVANCED_ART_INPAINTING": "1"},
-    "equilibrado": {"PIPELINE_PAGE_WORKERS": "2", "OCR_RESIDUAL_SWEEP_MODE": "always",
-                    "CLEAN_COMPARE_FILLS": "1", "ADVANCED_ART_INPAINTING": "1"},
-    "qualidade": {"OCR_RESIDUAL_SWEEP_MODE": "always",
-                  "CLEAN_COMPARE_FILLS": "1", "ADVANCED_ART_INPAINTING": "1"},
+    "leve": {
+        "PIPELINE_PAGE_WORKERS": "1",
+        "OCR_RESIDUAL_SWEEP_MODE": "off",
+        "CLEAN_COMPARE_FILLS": "0",
+        "CLEAN_SURFACE_FILL": "0",
+        "FONT_RASTER_MATCH": "0",
+        "LAMA_MAX_INFER_SIDE": "576",
+        "ADVANCED_ART_INPAINTING": "1",
+    },
+    "equilibrado": {
+        "PIPELINE_PAGE_WORKERS": "2",
+        "OCR_RESIDUAL_SWEEP_MODE": "always",
+        "CLEAN_COMPARE_FILLS": "1",
+        "LAMA_MAX_INFER_SIDE": "768",
+        "ADVANCED_ART_INPAINTING": "1",
+    },
+    "qualidade": {
+        "OCR_RESIDUAL_SWEEP_MODE": "always",
+        "CLEAN_COMPARE_FILLS": "1",
+        "LAMA_MAX_INFER_SIDE": "896",
+        "ADVANCED_ART_INPAINTING": "1",
+    },
 }
 _NOT_DEDICATED = re.compile(r"intel|basic|remote|virtual|parsec|vmware|hyper-v|citrix", re.I)
 

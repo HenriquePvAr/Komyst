@@ -1,6 +1,7 @@
 import difflib
 import contextvars
 import contextlib
+import functools
 import json
 import hashlib
 import math
@@ -2799,7 +2800,7 @@ def _caption_effect_cleanup(current_bgr, original_bgr, group):
     return result, mask, metrics
 
 
-def _clean_source_for_clean_artifact(current_bgr, original_bgr, group):
+def _clean_source_for_clean_artifact(current_bgr, original_bgr, group, *, precomputed_attempts=None):
     """Remove owned source glyphs for the CLEAN artifact without drawing a target.
 
     CLEAN is evidence of source-text removal, not proof that a provider supplied
@@ -2813,12 +2814,16 @@ def _clean_source_for_clean_artifact(current_bgr, original_bgr, group):
     group.clean_local_attempted = True
     group.spatial_harmonic_gate_rejected = False
     for strategy in _cleanup_strategies(group):
-        cleaned, cleanup_mask, metrics = _remove_text_for_group(
-            current_bgr,
-            original_bgr,
-            group,
-            strategy=strategy,
-        )
+        if isinstance(precomputed_attempts, dict) and strategy in precomputed_attempts:
+            cleaned, cleanup_mask, metrics, saved_spatial_rejected = precomputed_attempts[strategy]
+            group.spatial_harmonic_gate_rejected = bool(saved_spatial_rejected)
+        else:
+            cleaned, cleanup_mask, metrics = _remove_text_for_group(
+                current_bgr,
+                original_bgr,
+                group,
+                strategy=strategy,
+            )
         metrics = dict(metrics or {})
         attempt = {"strategy": strategy, **metrics}
         if (last_resort_mask is None and cleanup_mask is not None and np.any(cleanup_mask)
@@ -2889,11 +2894,8 @@ def _clean_source_for_clean_artifact(current_bgr, original_bgr, group):
         # drips) cannot survive outside an art-respecting mask, and neither
         # verifier nor OCR reliably sees such remains. The art-respecting mask is
         # the fallback. Either way the result is marked for art review.
-        is_sfx_or_art = (
-            str(getattr(group, "classification", "") or "").lower() == "sfx"
-            or str(getattr(group, "background_type", "") or "").lower() in {"sfx_area", "textured_art", "speed_lines"}
-        )
-        candidate_masks = (last_resort_mask,) if is_sfx_or_art else (last_resort_mask, _line_box_mask(group, last_resort_mask))
+        is_sfx_only = str(getattr(group, "classification", "") or "").lower() == "sfx"
+        candidate_masks = (last_resort_mask,) if is_sfx_only else (last_resort_mask, _line_box_mask(group, last_resort_mask))
         for candidate_mask in candidate_masks:
             if candidate_mask is None:
                 continue
@@ -3344,6 +3346,7 @@ def _render_analyzed_image(
         accepted_allowed_mask = None
         advanced_fallback_mask = None
         advanced_fallback_metrics = None
+        reusable_uncertain_clean = None
 
         render_allowed, render_block_reason = translation_allows_physical_render(group)
         if not render_allowed:
@@ -3458,9 +3461,18 @@ def _render_analyzed_image(
             in {"sfx_area", "textured_art"}
             and int(group.box[2]) * int(group.box[3]) >= 8000
         )
+        _gx, _gy, _gw, _gh = (int(v) for v in group.box)
+        _cy0, _cy1 = max(0, _gy - 280), min(original.shape[0], _gy + _gh + 280)
+        _cx0, _cx1 = max(0, _gx - 280), min(original.shape[1], _gx + _gw + 280)
+        _same_clean_canvas = bool(
+            _cy1 > _cy0 and _cx1 > _cx0
+            and np.array_equal(inpainted[_cy0:_cy1, _cx0:_cx1], before_group[_cy0:_cy1, _cx0:_cx1])
+        )
+        primary_raw_cleanup = {} if _same_clean_canvas else None
         for strategy in _cleanup_strategies(group):
             if straight_to_lama and strategy != "source_scoped":
                 continue
+            group.spatial_harmonic_gate_rejected = False
             inpaint_started = time.perf_counter()
             cleanup_kwargs = {"strategy": strategy}
             if forensic_capture is not None:
@@ -3471,6 +3483,13 @@ def _render_analyzed_image(
                 group,
                 **cleanup_kwargs,
             )
+            if primary_raw_cleanup is not None:
+                primary_raw_cleanup[strategy] = (
+                    cleaned,
+                    cleanup_mask.copy() if cleanup_mask is not None else None,
+                    dict(mask_metrics or {}),
+                    bool(getattr(group, "spatial_harmonic_gate_rejected", False)),
+                )
             if cleanup_mask is not None and np.any(cleanup_mask):
                 broad_mask = cleanup_mask
                 broad_mask_pixels = int(mask_metrics.get("mask_pixels_before_lettering_refine")
@@ -3731,6 +3750,22 @@ def _render_analyzed_image(
                 if key in mask_metrics:
                     visual_summary[key] = mask_metrics[key]
             group.visual_attempts.append(visual_summary)
+            if (
+                reusable_uncertain_clean is None
+                and visual_summary.get("visual_validation_passed")
+                and mask_metrics.get("art_fidelity_uncertain")
+                and not getattr(group, "spatial_harmonic_gate_rejected", False)
+                and cleanup_mask is not None
+                and np.any(cleanup_mask)
+            ):
+                ry0, ry1, rx0, rx1 = _mask_bbox_bounds(cleanup_mask, pad=24)
+                if ry1 > ry0 and rx1 > rx0 and np.array_equal(inpainted[ry0:ry1, rx0:rx1], before_group[ry0:ry1, rx0:rx1]):
+                    reusable_uncertain_clean = (
+                        cleaned.copy(),
+                        cleanup_mask.copy(),
+                        strategy,
+                        visual_summary.get("source_text_removal", {}),
+                    )
             if (
                 visual_summary.get("visual_validation_passed")
                 and not mask_metrics.get("art_fidelity_uncertain")
@@ -4110,9 +4145,37 @@ def _render_analyzed_image(
                 # lama_large already produced a valid clean reconstruction.
                 clean_mask = advanced_fallback_mask
                 clean_ok = True
+            elif reusable_uncertain_clean is not None:
+                cand_bgr, cand_mask, cand_strategy, cand_removal = reusable_uncertain_clean
+                legibility = _legible_source_residual(cand_bgr, group)
+                if legibility.get("status") != "legible":
+                    inpainted = inpainted.copy()
+                    inpainted[cand_mask > 0] = cand_bgr[cand_mask > 0]
+                    clean_mask = cand_mask
+                    clean_ok = True
+                    from komyst.clean.disposition import RegionDisposition
+                    group.clean_local_attempted = True
+                    group.clean_disposition = RegionDisposition.LOCAL_SAFE.value
+                    group.clean_disposition_reason = "owned_source_text_removed_art_fidelity_uncertain"
+                    group.clean_disposition_confidence = float(getattr(group, "quality_score", 0.0) or 0.0)
+                    group.clean_artifact_validation = {
+                        "clean_validation_passed": True,
+                        "strategy": cand_strategy,
+                        "source_text_removal": cand_removal,
+                        "art_fidelity_uncertain": True,
+                        "reused_primary_loop_clean": True,
+                    }
+                else:
+                    inpainted, clean_mask, _clean_strategy, clean_ok = (
+                        _clean_source_for_clean_artifact(
+                            inpainted, original, group, precomputed_attempts=primary_raw_cleanup,
+                        )
+                    )
             else:
                 inpainted, clean_mask, _clean_strategy, clean_ok = (
-                    _clean_source_for_clean_artifact(inpainted, original, group)
+                    _clean_source_for_clean_artifact(
+                        inpainted, original, group, precomputed_attempts=primary_raw_cleanup,
+                    )
                 )
             _clean_rescue_dt = time.perf_counter() - _clean_rescue_t0
             cleanup_seconds += _clean_rescue_dt
@@ -4592,12 +4655,13 @@ def _balloon_border_mask(image_bgr, lines):
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     heights = [int(line.box[3]) for line in lines if line.box[3] > 0]
     glyph = float(np.median(heights)) if heights else 20.0
-    dark = (gray < 100).astype(np.uint8)
+    dark = (gray < 140).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(dark, 8)
     big = np.zeros(count, dtype=bool)
     extent = np.maximum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT])
     big[1:] = extent[1:] >= 3.0 * glyph
-    return gray, big[labels]
+    thick_big = cv2.dilate(big[labels].astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    return gray, thick_big
 
 
 def _border_separates(border, line_box, group):
@@ -4630,13 +4694,19 @@ def _border_separates(border, line_box, group):
     if not light_around(nearest.box):
         return False
     gx, gy, gw, gh = (int(v) for v in nearest.box)
-    other = np.array([gx + gw / 2.0, gy + gh / 2.0])
-    steps = int(max(abs(other - center))) + 1
-    for t in np.linspace(0.0, 1.0, max(2, steps)):
-        px, py = (center + (other - center) * t).round().astype(int)
-        inside = (lx <= px < lx + lw and ly <= py < ly + lh) or (gx <= px < gx + gw and gy <= py < gy + gh)
-        if not inside and 0 <= px < width and 0 <= py < height and big[py, px]:
-            return True
+    # Any convex balloon contains every segment joining corresponding interior points
+    # of two lines inside it (20%, 50%, 80% across each line's width). In a pinched
+    # figure-8 / offset double-lobe balloon, the centre-to-centre chord can thread the
+    # narrow neck while the 20% or 80% chord crosses the indented balloon border.
+    for frac in (0.5, 0.2, 0.8):
+        p0 = np.array([lx + lw * frac, ly + lh / 2.0])
+        p1 = np.array([gx + gw * frac, gy + gh / 2.0])
+        steps = int(max(abs(p1 - p0))) + 1
+        for t in np.linspace(0.0, 1.0, max(2, steps)):
+            px, py = (p0 + (p1 - p0) * t).round().astype(int)
+            inside = (lx <= px < lx + lw and ly <= py < ly + lh) or (gx <= px < gx + gw and gy <= py < gy + gh)
+            if not inside and 0 <= px < width and 0 <= py < height and big[py, px]:
+                return True
     return False
 
 
@@ -6182,8 +6252,61 @@ def _decorative_short_display_story_promotion_allowed(group):
     return (dark_context or clause or typeset_caption) and saturated_context
 
 
+def _line_tilt_degrees(line) -> float:
+    poly = getattr(line, "polygon", None)
+    if poly is None:
+        return 0.0
+    arr = np.asarray(poly, dtype=np.float32)
+    if arr.shape != (4, 2):
+        return 0.0
+    dx = float(arr[1, 0] - arr[0, 0])
+    dy = float(arr[1, 1] - arr[0, 1])
+    if abs(dx) < 1.0:
+        return 0.0
+    return abs(float(np.degrees(np.arctan2(dy, dx))))
+
+
+def _is_unenclosed_non_latin_sfx_on_art(group) -> bool:
+    if bool(getattr(group, "has_balloon", False)) or bool(getattr(group, "preserve_as_name", False)):
+        return False
+    lines = getattr(group, "lines", None) or ()
+    if len(lines) != 1:
+        return False
+    raw = str(getattr(group, "text", "") or "").strip()
+    if not raw or not _NON_LATIN_SCRIPT_CHARS_RE.search(raw):
+        return False
+    if re.search(r"[?!,？！，]", raw):
+        return False
+    # Strip trailing ellipsis common on comic sounds ("스르륵...", "하아…") before counting glyphs.
+    core = re.sub(r"[.…·~〜ー\s]+$", "", raw).strip()
+    glyphs = _NON_LATIN_SCRIPT_CHARS_RE.findall(core)
+    if not (1 <= len(glyphs) <= 4) or len(glyphs) != len(re.sub(r"\s+", "", core)):
+        return False
+    bg = str(getattr(group, "background_type", "") or "").lower()
+    metrics = getattr(group, "background_metrics", None) or {}
+    if metrics.get("dominant_white_enclosure") or metrics.get("open_white_narration") or metrics.get("open_dark_narration"):
+        return False
+    tilted = _line_tilt_degrees(lines[0]) >= 5.5
+    return tilted or bg in {"sfx_area", "speed_lines"}
+
+
 def _apply_disabled_sfx_policy(group):
     """Apply only the disabled-SFX translation flag after background refinement."""
+    if not config.TRANSLATE_SFX and not bool(getattr(group, "preserve_as_name", False)):
+        if (
+            group.classification in {"speech", "narration", "thought", "unknown"}
+            and _is_unenclosed_non_latin_sfx_on_art(group)
+        ):
+            group.classification = "sfx"
+        elif (
+            group.classification in {"speech", "narration", "thought"}
+            and str(getattr(group, "background_type", "") or "").lower() != "dark_balloon"
+            and len(getattr(group, "lines", None) or ()) <= 2
+            and _is_short_expressive_sfx_text(
+                group.text, protected_names=getattr(group, "detected_proper_names", None) or ()
+            )
+        ):
+            group.classification = "sfx"
     if group.classification == "sfx" and not config.TRANSLATE_SFX:
         group.ignored = True
         group.ignore_reason = "sfx_translation_disabled"
@@ -6191,16 +6314,13 @@ def _apply_disabled_sfx_policy(group):
 
 def _apply_classification_policy(group):
     if (
-        not config.TRANSLATE_SFX
-        and group.classification in {"speech", "narration", "thought", "unknown"}
-        and not bool(getattr(group, "preserve_as_name", False))
-        and len(getattr(group, "lines", None) or ()) <= 2
-        and _is_short_expressive_sfx_text(
-            group.text, protected_names=getattr(group, "detected_proper_names", None) or ()
-        )
+        not bool(getattr(group, "inside_balloon_like_region", False))
+        and not str(getattr(group, "classification_reason", "") or "")
     ):
-        group.classification = "sfx"
-    _apply_disabled_sfx_policy(group)
+        _apply_disabled_sfx_policy(group)
+    elif group.classification == "sfx" and not config.TRANSLATE_SFX:
+        group.ignored = True
+        group.ignore_reason = "sfx_translation_disabled"
     if group.classification == "sfx" and not config.TRANSLATE_SFX:
         return
     # A sound the glossary knows keeps its region alive even when the visual
@@ -9717,35 +9837,36 @@ def _masked_page_rediscovery(original_bgr, lines, ocr_lang, page_index=None):
     try:
         # Skip a second full-page tiled OCR when painting out known lines leaves
         # no uncovered glyph-shaped contrast components anywhere on the page.
-        scale = min(1.0, 1200.0 / float(max(height, width, 1)))
-        small_bgr = (
-            cv2.resize(painted, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
-            if scale < 1.0 else painted
-        )
-        small_cov = (
-            cv2.resize(covered.astype(np.uint8), (small_bgr.shape[1], small_bgr.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
-            if scale < 1.0 else covered
-        )
-        edges = cv2.Canny(cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY), 70, 170)
-        if np.any(small_cov):
-            dil = cv2.dilate(small_cov.astype(np.uint8), np.ones((5, 5), dtype=np.uint8), iterations=1) > 0
-            edges[dil] = 0
-        n_comp, _, c_stats, _ = cv2.connectedComponentsWithStats(edges, 8)
-        sh, sw = edges.shape[:2]
-        glyph_like = 0
-        for cid in range(1, n_comp):
-            cw = int(c_stats[cid, cv2.CC_STAT_WIDTH])
-            ch = int(c_stats[cid, cv2.CC_STAT_HEIGHT])
-            ca = int(c_stats[cid, cv2.CC_STAT_AREA])
-            if ca >= 6 and 3 <= cw <= int(0.65 * sw) and 3 <= ch <= int(0.65 * sh):
-                if max(cw, ch) / max(1, min(cw, ch)) <= 14.0:
-                    glyph_like += 1
-                    if glyph_like >= 2:
-                        break
-        if glyph_like < 2:
-            record["reason"] = "masked_rediscovery_no_uncovered_ink"
-            record["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
-            return lines, record
+        if height * width >= 250_000:
+            scale = min(1.0, 1200.0 / float(max(height, width, 1)))
+            small_bgr = (
+                cv2.resize(painted, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+                if scale < 1.0 else painted
+            )
+            small_cov = (
+                cv2.resize(covered.astype(np.uint8), (small_bgr.shape[1], small_bgr.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+                if scale < 1.0 else covered
+            )
+            edges = cv2.Canny(cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY), 70, 170)
+            if np.any(small_cov):
+                dil = cv2.dilate(small_cov.astype(np.uint8), np.ones((5, 5), dtype=np.uint8), iterations=1) > 0
+                edges[dil] = 0
+            n_comp, _, c_stats, _ = cv2.connectedComponentsWithStats(edges, 8)
+            sh, sw = edges.shape[:2]
+            glyph_like = 0
+            for cid in range(1, n_comp):
+                cw = int(c_stats[cid, cv2.CC_STAT_WIDTH])
+                ch = int(c_stats[cid, cv2.CC_STAT_HEIGHT])
+                ca = int(c_stats[cid, cv2.CC_STAT_AREA])
+                if ca >= 6 and 3 <= cw <= int(0.65 * sw) and 3 <= ch <= int(0.65 * sh):
+                    if max(cw, ch) / max(1, min(cw, ch)) <= 14.0:
+                        glyph_like += 1
+                        if glyph_like >= 2:
+                            break
+            if glyph_like < 2:
+                record["reason"] = "masked_rediscovery_no_uncovered_ink"
+                record["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
+                return lines, record
         found = engines[0].detect_lines(painted, page=page_index)
     except Exception as exc:  # noqa: BLE001 - recorded, never fatal
         errors.append({"engine": engines[0].engine, "stage": "detect", "exception_type": type(exc).__name__})
@@ -14066,6 +14187,23 @@ def source_lettering_footprint(
 
 
 _RESIDUAL_OCR_ENGINES = []
+_RESIDUAL_OCR_ENGINES_BY_LANG = {}
+
+
+def _infer_residual_ocr_lang(group) -> str:
+    explicit = str(getattr(group, "ocr_lang", None) or "").strip()
+    if explicit:
+        return explicit
+    sample = str(getattr(group, "text", "") or "")
+    if re.search(r"[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]", sample):
+        return "ko"
+    if re.search(r"[\u3040-\u30ff]", sample):
+        return "ja"
+    if re.search(r"[\u4e00-\u9fff]", sample):
+        return "zh"
+    if re.search(r"[\u0400-\u04ff]", sample):
+        return "ru"
+    return "en"
 
 
 def _legible_source_residual(cleaned_bgr, group, *, include_shared_tokens=False):
@@ -14074,7 +14212,7 @@ def _legible_source_residual(cleaned_bgr, group, *, include_shared_tokens=False)
     The pixel residual checks compare against a "lettering footprint" that, on
     hatching or halftone, also contains the art next to the glyphs, so they kept
     refusing reconstructions that had removed every letter. Reading the cleaned
-    crop with the OCR answers the question that matters: is the English still
+    crop with the OCR answers the question that matters: is the source text still
     there? ``not_legible`` only when the OCR ran and read none of the group's
     meaningful source tokens; otherwise the caller keeps its refusal.
     """
@@ -14083,8 +14221,12 @@ def _legible_source_residual(cleaned_bgr, group, *, include_shared_tokens=False)
     lines = _cleanup_lines_for_group(group)
     if cleaned_bgr is None or not lines:
         return {"status": "unavailable", "reason": "no_lines"}
-    source_tokens = set(source_completeness.meaningful_tokens(getattr(group, "text", "") or ""))
-    if not source_tokens:
+    group_text = str(getattr(group, "text", "") or "")
+    target_text = "" if include_shared_tokens else str(getattr(group, "translation", "") or "")
+    source_tokens = set(source_completeness.meaningful_tokens(group_text))
+    source_script_chars = set(_NON_LATIN_SCRIPT_CHARS_RE.findall(group_text))
+    target_script_chars = set(_NON_LATIN_SCRIPT_CHARS_RE.findall(target_text))
+    if not source_tokens and not source_script_chars:
         return {"status": "unavailable", "reason": "no_meaningful_source_tokens"}
     x1 = min(int(line.box[0]) for line in lines)
     y1 = min(int(line.box[1]) for line in lines)
@@ -14093,11 +14235,19 @@ def _legible_source_residual(cleaned_bgr, group, *, include_shared_tokens=False)
     line_height = max(int(line.box[3]) for line in lines)
     height, width = cleaned_bgr.shape[:2]
     errors = []
-    if not _RESIDUAL_OCR_ENGINES:
-        _RESIDUAL_OCR_ENGINES.extend(_reocr_engines_for(getattr(group, "ocr_lang", None) or "en", errors))
-    if not _RESIDUAL_OCR_ENGINES:
+    if _RESIDUAL_OCR_ENGINES:
+        engines = _RESIDUAL_OCR_ENGINES
+    else:
+        lang = _infer_residual_ocr_lang(group)
+        engines = _RESIDUAL_OCR_ENGINES_BY_LANG.get(lang)
+        if not engines:
+            engines = list(_reocr_engines_for(lang, errors))
+            if engines:
+                _RESIDUAL_OCR_ENGINES_BY_LANG[lang] = engines
+    if not engines:
         return {"status": "unavailable", "reason": "engine_unavailable", "engine_errors": errors}
     read_stream = []
+    read_script_chars = set()
     # The detector's reading depends on the crop (a margin of half a line missed
     # "RURAL" that a full line of margin read); either crop reading a source word
     # means it is still there.
@@ -14105,33 +14255,41 @@ def _legible_source_residual(cleaned_bgr, group, *, include_shared_tokens=False)
     # neighbouring caption with the same words (two "*flicker*" on one page).
     own_pad = max(2, int(round(0.25 * line_height)))
     own = (x1 - own_pad, y1 - own_pad, x2 + own_pad, y2 + own_pad)
+    min_conf = 0.45 if source_script_chars else 0.5
     for pad in (max(4, int(round(0.5 * line_height))), max(8, line_height)):
         cx, cy = max(0, x1 - pad), max(0, y1 - pad)
         crop = cleaned_bgr[cy:min(height, y2 + pad), cx:min(width, x2 + pad)]
         if not crop.size:
             continue
         for _engine, text, _confidence, crop_lines in _reocr_crop_candidates(
-                _RESIDUAL_OCR_ENGINES, crop, errors=errors):
+                engines, crop, errors=errors):
             for item in crop_lines:
-                if float(item.confidence or 0.0) < 0.5:
+                if float(item.confidence or 0.0) < min_conf:
                     continue
                 bx, by, bw, bh = (int(v) for v in item.box)
                 ix = max(0, min(cx + bx + bw, own[2]) - max(cx + bx, own[0]))
                 iy = max(0, min(cy + by + bh, own[3]) - max(cy + by, own[1]))
                 if ix * iy >= 0.3 * max(1, bw * bh):
                     read_stream.extend(source_completeness.fold_tokens(item.text))
-        if read_stream:
+                    if source_script_chars:
+                        read_script_chars.update(_NON_LATIN_SCRIPT_CHARS_RE.findall(str(item.text or "")))
+        if read_stream or read_script_chars:
             _early_present = source_completeness._represented_token_forms(
-                source_completeness.fold_tokens(getattr(group, "text", "") or ""), [read_stream])
-            _early_target = set() if include_shared_tokens else set(source_completeness.fold_tokens(getattr(group, "translation", "") or ""))
+                source_completeness.fold_tokens(group_text), [read_stream])
+            _early_target = set() if include_shared_tokens else set(source_completeness.fold_tokens(target_text))
             if any(tok in _early_present and tok not in _early_target for tok in source_tokens):
                 break
-    if errors and not read_stream:
+            if (source_script_chars & read_script_chars) - target_script_chars:
+                break
+    if errors and not read_stream and not read_script_chars:
         return {"status": "unavailable", "reason": "engine_failed", "engine_errors": errors}
     present = source_completeness._represented_token_forms(
-        source_completeness.fold_tokens(getattr(group, "text", "") or ""), [read_stream])
-    target_tokens = set() if include_shared_tokens else set(source_completeness.fold_tokens(getattr(group, "translation", "") or ""))
-    legible = sorted(token for token in source_tokens if token in present and token not in target_tokens)
+        source_completeness.fold_tokens(group_text), [read_stream])
+    target_tokens = set() if include_shared_tokens else set(source_completeness.fold_tokens(target_text))
+    legible_set = {token for token in source_tokens if token in present and token not in target_tokens}
+    if source_script_chars:
+        legible_set.update((source_script_chars & read_script_chars) - target_script_chars)
+    legible = sorted(legible_set)
     return {"status": "legible" if legible else "not_legible",
             "legible_source_tokens": legible, "read_token_count": len(read_stream)}
 
@@ -16118,7 +16276,11 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
         "flat_patch_largest_component_area": 0,
         "flat_patch_rejected": False,
     }
-    if cleanup_mask is None or not np.any(cleanup_mask):
+    if cleanup_mask is None:
+        return empty
+    radius = int(config.FLAT_FILL_RING_RADIUS)
+    roi = _mask_roi(cleanup_mask, radius + 24)
+    if roi is None:
         return empty
     background_metrics = getattr(group, "background_metrics", {}) or {}
     if (
@@ -16132,6 +16294,14 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
             "flat_fill_supported": True,
             "light_page_restoration": True,
         }
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if isinstance(enclosure, np.ndarray) and enclosure.shape == np.asarray(cleanup_mask).shape[:2]:
+        enclosure = enclosure[roi]
+    else:
+        enclosure = None
+    original_bgr = original_bgr[roi]
+    cleaned_bgr = cleaned_bgr[roi]
+    cleanup_mask = np.asarray(cleanup_mask)[roi]
     flatness = _local_background_flatness(original_bgr, cleanup_mask)
     if flatness["flat_fill_supported"]:
         return {**empty, **flatness}
@@ -16149,7 +16319,6 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
         (int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, count)),
         default=0,
     )
-    radius = int(config.FLAT_FILL_RING_RADIUS)
     # The ring starts 3 px out: the band right at the mask still holds the
     # lettering's outline/glow remains, which read as "texture" around a plain
     # white balloon (TAP: ring 12.0 vs a clean fill 1.8) - the same reason the
@@ -16168,8 +16337,7 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
         cv2.MORPH_ELLIPSE, (gap * 2 + 1, gap * 2 + 1))) > 0)
     original_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
     cleaned_gray = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2GRAY)
-    enclosure = getattr(group, "light_enclosure_interior", None)
-    if isinstance(enclosure, np.ndarray) and enclosure.shape == ring.shape and np.any(ring & enclosure):
+    if enclosure is not None and enclosure.shape == ring.shape and np.any(ring & enclosure):
         # Inside a known balloon the reference is the balloon, not the art beyond its border.
         ring = ring & enclosure
     ring_laplacian = np.abs(cv2.Laplacian(original_gray, cv2.CV_32F))[ring]
@@ -16446,6 +16614,27 @@ def _dark_blotch_artifact_metrics(
             "dark_blotch_rejected": False,
         }
 
+    roi = _mask_roi(cleanup_mask, 32)
+    if roi is None:
+        return {
+            "new_dark_patch_pixels": 0,
+            "largest_new_dark_component_area": 0,
+            "new_dark_patch_to_group_ratio": 0.0,
+            "dark_blotch_rejected": False,
+        }
+    layers = _active_caption_effect_layers(original_bgr, group, cleanup_mask)
+    owned_glow_roi = None
+    if layers is not None:
+        from komyst.clean.ownership.lettering_effects import paired_boundary_color
+        continuity = paired_boundary_color(original_bgr, cleaned_bgr, cleanup_mask,
+                                           protected_mask=layers.protected)
+        protected = (layers.protected > 0) & (layers.effect > 0)
+        protected_changed = np.any(np.any(original_bgr != cleaned_bgr, axis=2) & protected)
+        if continuity.get("passed") and not protected_changed:
+            owned_glow_roi = (layers.glow > 0)[roi]
+    original_bgr = original_bgr[roi]
+    cleaned_bgr = cleaned_bgr[roi]
+    cleanup_mask = np.asarray(cleanup_mask)[roi]
     original_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
     cleaned_gray = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2GRAY)
     new_dark = (
@@ -16456,19 +16645,11 @@ def _dark_blotch_artifact_metrics(
     )
     original_new_dark_pixels = int(np.count_nonzero(new_dark))
     owned_glow_darkened_pixels = 0
-    layers = _active_caption_effect_layers(original_bgr, group, cleanup_mask)
-    if layers is not None:
-        from komyst.clean.ownership.lettering_effects import paired_boundary_color
-        continuity = paired_boundary_color(original_bgr, cleaned_bgr, cleanup_mask,
-                                           protected_mask=layers.protected)
-        protected = (layers.protected > 0) & (layers.effect > 0)
-        protected_changed = np.any(np.any(original_bgr != cleaned_bgr, axis=2) & protected)
-        if continuity.get("passed") and not protected_changed:
-            owned_glow = layers.glow > 0
-            owned_glow_darkened_pixels = int(np.count_nonzero(new_dark & owned_glow))
-            # Only source-evidenced glow pixels are exempt. Remaining light art
-            # still enters the original island/continuity checks below.
-            new_dark = new_dark & ~owned_glow
+    if owned_glow_roi is not None:
+        owned_glow_darkened_pixels = int(np.count_nonzero(new_dark & owned_glow_roi))
+        # Only source-evidenced glow pixels are exempt. Remaining light art
+        # still enters the original island/continuity checks below.
+        new_dark = new_dark & ~owned_glow_roi
     new_dark_u8 = new_dark.astype(np.uint8) * 255
     count, labels, stats, _ = cv2.connectedComponentsWithStats(new_dark_u8, 8)
     # Dark reconstruction where light *lettering* was, touching dark artwork just
@@ -17685,11 +17866,10 @@ def _mask_roi(mask, margin):
     The gates only look a bounded distance past the mask, so running them on this
     crop gives the same numbers as the full page at a fraction of the cost.
     """
-    ys, xs = np.nonzero(mask)
-    if not ys.size:
+    y0, y1, x0, x1 = _mask_bbox_bounds(mask, pad=int(margin))
+    if y1 <= y0 or x1 <= x0:
         return None
-    return (slice(max(0, ys.min() - margin), min(mask.shape[0], ys.max() + margin + 1)),
-            slice(max(0, xs.min() - margin), min(mask.shape[1], xs.max() + margin + 1)))
+    return (slice(y0, y1), slice(x0, x1))
 
 
 def _fill_consistency_parts(source_bgr, candidate_bgr, cleanup_mask):
@@ -17927,32 +18107,74 @@ def _learned_texture_fill(current_bgr, group, cleanup_mask, strategy, force=Fals
 def _outline_residue_mask(group, mask_u8, band=6):
     """The outline's soft outer edge left just outside the mask, or ``None``.
 
-    Thick dark outlines fade into the backdrop over a few pixels; the mask stops
-    before that fade, and every fill diffuses its dark values back in as ghost
-    letters. Pixels within ``band`` px of the mask that stand clearly off the
-    backdrop measured further out, and touch the mask, join the fill - only
-    inside the group's own box, where the render may change pixels anyway.
+    Thick dark outlines and soft outer glows fade into the backdrop over several
+    pixels; the mask stops before that fade, and every fill diffuses its edge
+    values back in as ghost letters. Pixels within ``band`` px of the mask (up to
+    14 px for bright glowing lettering over a uniform dark backdrop) that stand
+    clearly off the backdrop measured further out, and touch the mask, join the
+    fill - inside the group's padded region.
     """
     source = getattr(group, "_fill_source_bgr", None)
-    if source is None or not np.any(mask_u8):
+    if source is None:
+        return None
+    my0, my1, mx0, mx1 = _mask_bbox_bounds(mask_u8, pad=0)
+    if my1 <= my0 or mx1 <= mx0:
         return None
     x, y, w, h = [int(v) for v in group.box]
-    pad = band + 2
-    y0, y1 = max(0, y - pad), min(mask_u8.shape[0], y + h + pad)
-    x0, x1 = max(0, x - pad), min(mask_u8.shape[1], x + w + pad)
+    max_band = max(int(band), 14)
+    pad = max_band + 16
+    y0 = max(0, min(y, my0) - pad)
+    y1 = min(mask_u8.shape[0], max(y + h, my1) + pad)
+    x0 = max(0, min(x, mx0) - pad)
+    x1 = min(mask_u8.shape[1], max(x + w, mx1) + pad)
     local = mask_u8[y0:y1, x0:x1]
     gray = cv2.cvtColor(source[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
     distance = cv2.distanceTransform((local == 0).astype(np.uint8), cv2.DIST_L2, 3)
-    near = (distance > 0) & (distance <= band)
-    far = (distance > band + 2) & (distance <= band + 14)
+    far_dark = (distance > 14) & (distance <= 26)
+    core_vals = gray[local > 0]
+    core_luma = float(np.percentile(core_vals, 90)) if core_vals.size else 0.0
+    use_dark_glow = False
+    if np.count_nonzero(far_dark) >= 40:
+        dark_bg = float(np.median(gray[far_dark]))
+        dark_spread = float(np.median(np.abs(gray[far_dark] - dark_bg))) * 1.4826
+        mid_ring = (distance > 3) & (distance <= 9)
+        if (
+            dark_bg <= 45.0
+            and dark_spread <= 8.0
+            and core_luma >= dark_bg + 70.0
+            and np.count_nonzero(mid_ring) >= 20
+            and float(np.percentile(gray[mid_ring], 75)) > dark_bg + max(6.0, 2.5 * dark_spread)
+        ):
+            use_dark_glow = True
+    eff_band = max_band if use_dark_glow else int(band)
+    near = (distance > 0) & (distance <= eff_band)
+    far = far_dark if use_dark_glow else ((distance > eff_band + 2) & (distance <= eff_band + 14))
     if np.count_nonzero(far) < 40:
         return None
     backdrop = float(np.median(gray[far]))
     spread = float(np.median(np.abs(gray[far] - backdrop))) * 1.4826
-    off = near & (np.abs(gray - backdrop) > max(14.0, 3.0 * spread))
+    thresh = max(6.0, 2.5 * spread) if use_dark_glow else max(14.0, 3.0 * spread)
+    off = near & ((gray - backdrop > thresh) if use_dark_glow else (np.abs(gray - backdrop) > thresh))
+    if use_dark_glow:
+        outer_cap = (distance > eff_band - 1.5) & (distance <= eff_band)
+        if np.count_nonzero(outer_cap) and float(np.mean(off[outer_cap])) > 0.35:
+            near = (distance > 0) & (distance <= int(band))
+            off = near & (np.abs(gray - backdrop) > max(14.0, 3.0 * spread))
+    else:
+        # Keep non-glow outline extension strictly inside group.box + band + 2 as before.
+        gy0 = max(0, y - (int(band) + 2)) - y0
+        gy1 = min(mask_u8.shape[0], y + h + (int(band) + 2)) - y0
+        gx0 = max(0, x - (int(band) + 2)) - x0
+        gx1 = min(mask_u8.shape[1], x + w + (int(band) + 2)) - x0
+        box_gate = np.zeros(local.shape, dtype=bool)
+        box_gate[max(0, gy0):min(local.shape[0], gy1), max(0, gx0):min(local.shape[1], gx1)] = True
+        off = off & box_gate
     count, labels = cv2.connectedComponents((off | (local > 0)).astype(np.uint8), connectivity=8)
     touching = np.unique(labels[local > 0])
     residue_local = off & np.isin(labels, touching[touching > 0])
+    if use_dark_glow and np.any(residue_local):
+        residue_local = cv2.dilate(residue_local.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        residue_local &= distance <= (eff_band + 1)
     residue = np.zeros(mask_u8.shape, dtype=bool)
     residue[y0:y1, x0:x1] = residue_local
     return residue
@@ -18068,15 +18290,10 @@ def _measured_halo_mask(source_bgr, mask_u8, max_px=8, tol=30):
     over real art: the single biggest error source). Growth is capped at ``max_px`` and
     cut to 4 px when the colour never ends (it is the backdrop, not a halo).
     """
-    ys, xs = np.nonzero(mask_u8)
-    if not len(xs):
+    pad = max(int(max_px), 18) + 3
+    y0, y1, x0, x1 = _mask_bbox_bounds(mask_u8, pad=pad)
+    if y1 <= y0 or x1 <= x0:
         return mask_u8
-    # All reads and writes below are within max_px plus the final 3x3 close
-    # and dilate. Restrict the expensive distance transform, colour comparison
-    # and component labelling to that context instead of a multi-megapixel page.
-    pad = max_px + 3
-    y0, y1 = max(0, int(ys.min()) - pad), min(mask_u8.shape[0], int(ys.max()) + pad + 1)
-    x0, x1 = max(0, int(xs.min()) - pad), min(mask_u8.shape[1], int(xs.max()) + pad + 1)
     local = _measured_halo_mask_local(source_bgr[y0:y1, x0:x1], mask_u8[y0:y1, x0:x1], max_px, tol)
     result = mask_u8.copy()
     result[y0:y1, x0:x1] = local
@@ -18085,6 +18302,8 @@ def _measured_halo_mask(source_bgr, mask_u8, max_px=8, tol=30):
 
 def _measured_halo_mask_local(source_bgr, mask_u8, max_px, tol):
     inside = mask_u8 > 0
+    if not np.any(inside):
+        return mask_u8
     dist = cv2.distanceTransform((~inside).astype(np.uint8), cv2.DIST_L2, 3)
     sample = (dist > 2) & (dist <= 4)
     if np.count_nonzero(sample) < 20:
@@ -18104,6 +18323,31 @@ def _measured_halo_mask_local(source_bgr, mask_u8, max_px, tol):
     grown = cv2.morphologyEx(halo.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     grown = cv2.dilate(grown, np.ones((3, 3), np.uint8))  # the blurred outer edge
     grown[dist > max_px + 1] = 0
+    if max_px >= 8:
+        gray = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        far_dark = (dist > 14) & (dist <= 18)
+        if np.count_nonzero(far_dark) >= 40:
+            bg_luma = float(np.median(gray[far_dark]))
+            bg_mad = float(np.median(np.abs(gray[far_dark] - bg_luma))) * 1.4826
+            core_luma = float(np.percentile(gray[inside], 90))
+            mid_glow = (dist > 3) & (dist <= 9)
+            if (
+                bg_luma <= 45.0
+                and bg_mad <= 6.0
+                and core_luma >= bg_luma + 70.0
+                and np.count_nonzero(mid_glow) >= 20
+                and (bg_luma + max(6.0, 2.5 * bg_mad)) < float(np.percentile(gray[mid_glow], 75)) < (core_luma - 12.0)
+            ):
+                glow_cand = (dist <= 14) & ((gray - bg_luma) > max(6.0, 2.5 * bg_mad))
+                outer_glow_cap = (dist > 12.5) & (dist <= 14)
+                if not (np.count_nonzero(outer_glow_cap) and float(np.mean(glow_cand[outer_glow_cap])) > 0.30):
+                    _gc, glabels = cv2.connectedComponents((glow_cand | inside).astype(np.uint8), connectivity=8)
+                    gtouch = np.unique(glabels[inside])
+                    glow_conn = glow_cand & np.isin(glabels, gtouch[gtouch > 0])
+                    if np.any(glow_conn):
+                        glow_u8 = cv2.dilate(glow_conn.astype(np.uint8), np.ones((3, 3), np.uint8))
+                        glow_u8[dist > 15] = 0
+                        grown = np.maximum(grown, glow_u8)
     return np.maximum(grown, mask_u8)
 
 
@@ -18488,10 +18732,10 @@ def _apply_cleanup_mask_fill(current_bgr, original_bgr, group, cleanup_mask, str
     elif dark_region:
         fill_color = _estimated_background_color(
             original_bgr,
-            cleanup_mask,
+            fill_mask,
             draw_box,
         )
-        result[cleanup_mask > 0] = fill_color
+        result[fill_mask > 0] = fill_color
     elif strategy == "source_scoped":
         source_display = _source_scoped_display_footprint_required(original_bgr, group)
         source_display_dark_context = bool(
@@ -18536,10 +18780,15 @@ def _restore_lost_local_texture(result_bgr, source_bgr, mask, *, ring_radius=Non
     ``group.texture_synthesized`` is set so the caller can keep reporting the
     honest "review" disposition even though the ugly flat block is gone.
     """
-    mask_u8 = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    radius = int(ring_radius or config.FLAT_FILL_RING_RADIUS)
+    roi = _mask_roi(mask, radius + 24)
+    if roi is None:
+        return result_bgr
+    mask_u8 = (np.asarray(mask)[roi] > 0).astype(np.uint8) * 255
     if not np.any(mask_u8):
         return result_bgr
-    radius = int(ring_radius or config.FLAT_FILL_RING_RADIUS)
+    source_roi = source_bgr[roi]
+    result_roi = result_bgr[roi]
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
     ring = (cv2.dilate(mask_u8, kernel, iterations=1) > 0) & (mask_u8 == 0)
     if not np.any(ring):
@@ -18549,8 +18798,8 @@ def _restore_lost_local_texture(result_bgr, source_bgr, mask, *, ring_radius=Non
     ) > 0
     if not np.any(interior):
         interior = mask_u8 > 0
-    source_gray = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2GRAY)
-    result_gray = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2GRAY)
+    source_gray = cv2.cvtColor(source_roi, cv2.COLOR_BGR2GRAY)
+    result_gray = cv2.cvtColor(result_roi, cv2.COLOR_BGR2GRAY)
     ring_laplacian = np.abs(cv2.Laplacian(source_gray, cv2.CV_32F))[ring]
     source_texture = float(ring_laplacian.mean())
     if source_texture <= 1e-3:
@@ -18588,9 +18837,10 @@ def _restore_lost_local_texture(result_bgr, source_bgr, mask, *, ring_radius=Non
     sigma_field = np.clip(deficit_field * 0.6, 0.0, 22.0)
     rng = np.random.default_rng(0)
     noise = rng.normal(0.0, 1.0, size=result_gray.shape).astype(np.float32) * sigma_field
-    noisy = result_bgr.astype(np.float32) + noise[..., None]
+    noisy = result_roi.astype(np.float32) + noise[..., None]
     result = result_bgr.copy()
-    result[interior] = np.clip(noisy[interior], 0, 255).astype(np.uint8)
+    result_view = result[roi]
+    result_view[interior] = np.clip(noisy[interior], 0, 255).astype(np.uint8)
     if group is not None:
         group.texture_synthesized = True
     return result
@@ -18607,14 +18857,18 @@ def _telea_source_without_fringe(img_bgr, mask):
     pixels outside the mask are never written.
     """
     # ponytail: one median per mask; a per-glyph local median if texture varies a lot.
-    selected = (np.asarray(mask) > 0).astype(np.uint8)
+    roi = _mask_roi(mask, 16)
+    if roi is None:
+        return img_bgr
+    selected = (np.asarray(mask)[roi] > 0).astype(np.uint8)
+    img_roi = img_bgr[roi]
     kernel = np.ones((3, 3), np.uint8)
     near = (cv2.dilate(selected, kernel, iterations=2) > 0) & (selected == 0)
     far = (cv2.dilate(selected, kernel, iterations=6) > 0) & ~(
         cv2.dilate(selected, kernel, iterations=3) > 0)
     if np.count_nonzero(far) < 30:
         return img_bgr
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray = cv2.cvtColor(img_roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
     median = float(np.median(gray[far]))
     mad = float(np.median(np.abs(gray[far] - median)))
     reach = (cv2.dilate(selected, kernel, iterations=6) > 0) & (selected == 0)
@@ -18628,7 +18882,8 @@ def _telea_source_without_fringe(img_bgr, mask):
     if not np.any(leftovers):
         return img_bgr
     source = img_bgr.copy()
-    source[leftovers] = np.median(img_bgr[far], axis=0).astype(img_bgr.dtype)
+    source_view = source[roi]
+    source_view[leftovers] = np.median(img_roi[far], axis=0).astype(img_bgr.dtype)
     return source
 
 
@@ -18975,6 +19230,15 @@ _RASTER_MATCH_MIN_GAIN = 0.03
 
 def _raster_font_choice(source_bgr, group, profile, text, font_path, font_role):
     """The candidate face that redraws the source lines best, when it clearly beats the role's face."""
+    source_text = str(getattr(group, "text", "") or "")
+    if source_text and _NON_LATIN_SCRIPT_CHARS_RE.search(source_text):
+        # Latin display/dialogue candidate faces cannot match Hangul/CJK/Cyrillic source glyphs by raster IoU.
+        return None
+    cache = getattr(group, "_cached_raster_font_choice", None)
+    cache_key = (str(font_path or ""), str(font_role or ""), str(text or ""))
+    if isinstance(cache, dict) and cache_key in cache:
+        cached = cache[cache_key]
+        return dict(cached) if isinstance(cached, dict) else cached
     lines = [line for line in (getattr(group, "lines", None) or []) if getattr(line, "box", None)]
     if not lines:
         return None
@@ -18983,17 +19247,28 @@ def _raster_font_choice(source_bgr, group, profile, text, font_path, font_role):
         masks = font_fidelity.source_line_masks(source_bgr, lines, ink_bgr=ink)
         best = font_fidelity.match_font_by_raster(masks, font_fidelity.raster_match_pool(), draw_text=text)
         if not best or best["score"] < _RASTER_MATCH_MIN_SCORE:
-            return None
-        role_font = get_font(font_path, 40, role=font_role, prefer_role=True, text=text)
-        role_path = str(getattr(role_font, "path", "") or "")
-        if role_path and Path(role_path).resolve() == Path(best["path"]).resolve():
-            return None
-        role_score = (font_fidelity.match_font_by_raster(masks, [role_path]) or {}).get("score", 0.0)             if role_path else 0.0
+            result = None
+        else:
+            role_font = get_font(font_path, 40, role=font_role, prefer_role=True, text=text)
+            role_path = str(getattr(role_font, "path", "") or "")
+            if role_path and Path(role_path).resolve() == Path(best["path"]).resolve():
+                result = None
+            else:
+                role_score = (font_fidelity.match_font_by_raster(masks, [role_path]) or {}).get("score", 0.0) if role_path else 0.0
+                if best["score"] - float(role_score) < _RASTER_MATCH_MIN_GAIN:
+                    result = None
+                else:
+                    result = {**best, "role_font": Path(role_path).name if role_path else "", "role_score": round(float(role_score), 4)}
     except Exception:  # noqa: BLE001 - font matching refines the choice, it never blocks rendering
-        return None
-    if best["score"] - float(role_score) < _RASTER_MATCH_MIN_GAIN:
-        return None
-    return {**best, "role_font": Path(role_path).name if role_path else "", "role_score": round(float(role_score), 4)}
+        result = None
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            group._cached_raster_font_choice = cache
+        except Exception:
+            pass
+    cache[cache_key] = dict(result) if isinstance(result, dict) else result
+    return result
 
 
 _SOURCE_LABEL_LINE = re.compile(r"^\s*[A-Za-z][A-Za-z ]{0,24}:\s*\S")
@@ -19044,8 +19319,20 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         else _text_style_for_region(img_bgr, draw_box)
     )
     typography_source = source_bgr if source_bgr is not None else img_bgr
-    typography_profile = typography_profile_for_region(
-        typography_source, group, draw_box, style=style)
+    typo_cache = getattr(group, "_cached_typo_profile", None)
+    typo_key = (tuple(draw_box), str(style.name), id(typography_source))
+    if isinstance(typo_cache, dict) and typo_key in typo_cache:
+        typography_profile = dict(typo_cache[typo_key])
+    else:
+        typography_profile = typography_profile_for_region(
+            typography_source, group, draw_box, style=style)
+        if not isinstance(typo_cache, dict):
+            typo_cache = {}
+            try:
+                group._cached_typo_profile = typo_cache
+            except Exception:
+                pass
+        typo_cache[typo_key] = dict(typography_profile)
     style = _text_style_from_typography_profile(style, typography_profile)
     if typography_profile.get("case_style") == "uppercase":
         text = str(text).upper()
@@ -22603,8 +22890,19 @@ def _split_long_word(draw, word, font, max_width):
     return chunks or [word]
 
 
+_SHARED_TEXT_MEASURE_DRAW = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+
+
+@functools.lru_cache(maxsize=16384)
+def _cached_font_text_bbox(font, text: str, stroke_width: int = 0) -> tuple[int, int, int, int]:
+    return _SHARED_TEXT_MEASURE_DRAW.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+
+
 def _text_width(draw, text, font):
-    bbox = draw.textbbox((0, 0), text, font=font)
+    try:
+        bbox = _cached_font_text_bbox(font, str(text), 0)
+    except TypeError:
+        bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
 
 
@@ -22612,8 +22910,12 @@ def _lines_height(draw, lines, font, stroke_width=0):
     if not lines:
         return 0
     total = 0
+    sw = int(stroke_width or 0)
     for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        try:
+            bbox = _cached_font_text_bbox(font, str(line), sw)
+        except TypeError:
+            bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
         total += bbox[3] - bbox[1] + 3
     return total
 
@@ -22621,11 +22923,17 @@ def _lines_height(draw, lines, font, stroke_width=0):
 def _widest_line(draw, lines, font, stroke_width=0):
     if not lines:
         return 0
-    return max(
-        draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)[2]
-        - draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)[0]
-        for line in lines
-    )
+    sw = int(stroke_width or 0)
+    widest = 0
+    for line in lines:
+        try:
+            bbox = _cached_font_text_bbox(font, str(line), sw)
+        except TypeError:
+            bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        w = bbox[2] - bbox[0]
+        if w > widest:
+            widest = w
+    return widest
 
 
 def _write_debug_images(

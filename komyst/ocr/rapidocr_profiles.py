@@ -16,6 +16,7 @@ A language without a profile, or whose model files are missing, keeps the bundle
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -162,19 +163,22 @@ class RapidOCRProfileEngine:
         if use_dml:
             params["EngineConfig.onnxruntime.use_dml"] = True
         self.profile = profile
+        self._call_lock = threading.Lock()
         self._engine = RapidOCR(params=params)
 
     def __call__(self, image, use_cls=False, use_det=True, use_rec=True, **_ignored):
         started = time.perf_counter()
-        if use_det is False:
-            # Recogniser only (a crop already holding one line): RapidOCR 1.x shape
-            # ``[[text, score], ...]``.
-            output = self._engine(image, use_det=False, use_cls=False, use_rec=True)
-            texts = list(getattr(output, "txts", None) or [])
-            scores = list(getattr(output, "scores", None) or [1.0] * len(texts))
-            results = [[str(text), float(score)] for text, score in zip(texts, scores)]
-            return (results or None), time.perf_counter() - started
-        output = self._engine(image)
+        with self._call_lock:
+            if use_det is False:
+                # Recogniser only (a crop already holding one line): RapidOCR 1.x shape
+                # ``[[text, score], ...]``. RapidOCR 3's ``update_params`` mutates ``self._engine``
+                # in place, so every call must pass ``use_det``/``use_cls``/``use_rec`` explicitly.
+                output = self._engine(image, use_det=False, use_cls=False, use_rec=bool(use_rec))
+                texts = list(getattr(output, "txts", None) or [])
+                scores = list(getattr(output, "scores", None) or [1.0] * len(texts))
+                results = [[str(text), float(score)] for text, score in zip(texts, scores)]
+                return (results or None), time.perf_counter() - started
+            output = self._engine(image, use_det=True, use_cls=False, use_rec=bool(use_rec))
         boxes = getattr(output, "boxes", None)
         texts = getattr(output, "txts", None)
         scores = getattr(output, "scores", None)

@@ -938,6 +938,10 @@ def clean_ocr_text(text):
         else match.group(0),
         text,
     )
+    # Strip empty parentheses emitted when an alphabet-specific recognizer drops
+    # out-of-charset Hanja/ruby annotations ("무신() 원하진()" -> "무신 원하진").
+    text = re.sub(r"[\(（]\s*[\)）]", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return _normalize_censor_glyphs(_join_line_break_hyphens(text.strip()))
 
 
