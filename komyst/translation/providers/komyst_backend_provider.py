@@ -111,6 +111,7 @@ class BatchRequest:
     source_lang: str
     target_lang: str
     items: tuple[BatchItem, ...]
+    context: str = ""
 
     def __post_init__(self):
         if not self.request_id or not self.job_id or not self.items:
@@ -120,12 +121,37 @@ class BatchRequest:
             raise BackendTranslationError("invalid_batch_item")
         if len(ids) != len(set(ids)):
             raise BackendTranslationError("duplicate_item_id")
-        if len(self.items) > 100 or sum(len(i.text) for i in self.items) > 100_000:
+        if len(self.items) > 100 or sum(len(i.text) for i in self.items) > 100_000 or len(self.context or "") > 4000:
             raise BackendTranslationError("batch_limits_exceeded")
 
 
 MAX_BATCH_ITEMS = 100
 MAX_BATCH_CHARS = 100_000
+
+
+def _build_batch_scene_context(
+    chunk: tuple[BatchItem, ...],
+    all_items: tuple[BatchItem, ...],
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """Build bounded unbilled scene context from unique dialogue lines."""
+    seen: set[str] = set()
+    lines: list[str] = []
+    total = 0
+    for item in (*chunk, *all_items):
+        line = " ".join(str(item.text or "").split())
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        sep = 3 if lines else 0
+        if total + sep + len(line) > max_chars:
+            break
+        lines.append(line)
+        total += sep + len(line)
+        if len(lines) >= 32:
+            break
+    return " | ".join(lines)
 
 
 def _validated_device_uuid() -> str:
@@ -261,12 +287,26 @@ class HttpBackendClient:
 
     def reserve(self, *, job_id: str, request_id: str, auth_token: str, device_id: str = "") -> dict[str, Any]:
         started = time.perf_counter()
-        result = self._call("/functions/v1/wallet-reserve", {
+        payload = {
             "job_id": job_id, "request_id": request_id, "operation": "translation",
             "device_id": str(device_id or ""),
-        }, auth_token)
-        print(f"WALLET_RESERVE_RESULT duration_ms={int((time.perf_counter() - started) * 1000)}", flush=True)
-        return result
+        }
+        last_exc: BackendTranslationError | None = None
+        for attempt in range(3):
+            try:
+                result = self._call("/functions/v1/wallet-reserve", payload, auth_token)
+                print(
+                    f"WALLET_RESERVE_RESULT duration_ms={int((time.perf_counter() - started) * 1000)} attempts={attempt + 1}",
+                    flush=True,
+                )
+                return result
+            except BackendTranslationError as exc:
+                last_exc = exc
+                if str(exc).strip().casefold() != "backend_transport_failed" or attempt >= 2:
+                    raise
+                time.sleep(0.6 * (attempt + 1))
+        assert last_exc is not None
+        raise last_exc
 
     def release(self, *, reservation_id: str, auth_token: str) -> dict[str, Any]:
         # Client-callable RELEASE of a still-held reservation (wallet-finalize ->
@@ -298,6 +338,8 @@ class HttpBackendClient:
             "device_id": device_id,
             "items": [{"item_id": i.item_id, "text": i.text} for i in request.items],
         }
+        if request.context:
+            payload["context"] = str(request.context)[:4000]
         shape = _translation_execute_shape(payload)
         _persist_translation_execute_shape(shape)
         print("TRANSLATION_EXECUTE_REQUEST_SHAPE " + json.dumps({
@@ -796,13 +838,14 @@ class KomystBackendTranslationProvider:
         responses = []
         request_ids = []
         for index, chunk in enumerate(chunks, start=1):
+            chunk_context = _build_batch_scene_context(chunk, items, max_chars=2000)
             request_hash = ResultStore._input_hash(
                 BatchRequest(request_id, job_id, self.source_lang, "PT-BR", chunk))
             suffix = f":result:{request_hash[:32]}"
             if len(chunks) > 1:
                 suffix += f":batch:{index:04d}"
             sub_request_id = f"{request_id[:220-len(suffix)]}{suffix}"
-            sub_request = BatchRequest(sub_request_id, job_id, self.source_lang, "PT-BR", chunk)
+            sub_request = BatchRequest(sub_request_id, job_id, self.source_lang, "PT-BR", chunk, context=chunk_context)
             request_ids.append(sub_request_id)
             responses.append(sub_request)
 

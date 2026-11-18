@@ -1140,6 +1140,18 @@ def _entities_present(source_text, entities):
     return tuple(unique)
 
 
+_NON_LATIN_SOURCE_RE = re.compile(
+    r"[\u0400-\u04ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]"
+)
+
+
+def _source_uses_english_lexical_rules(source: str, source_lang: str = "en") -> bool:
+    if _NON_LATIN_SOURCE_RE.search(str(source or "")):
+        return False
+    lang = str(source_lang or "en").strip().lower()
+    return lang in {"", "3", "en", "eng", "ingles", "inglês", "english", "rapidocr"}
+
+
 def evaluate_local_fidelity(
     source_text,
     candidate,
@@ -1150,6 +1162,7 @@ def evaluate_local_fidelity(
     is_source_word=None,
     source_repair_reason="",
     context_texts=(),
+    source_lang="en",
 ):
     """Layer A. Deterministic, free, and honest about what it cannot decide.
 
@@ -1165,28 +1178,31 @@ def evaluate_local_fidelity(
     if classification not in TRANSLATABLE_CLASSIFICATIONS:
         return FidelityFinding()
 
+    english_rules = _source_uses_english_lexical_rules(source, source_lang)
+
     protected = _entities_present(source, protected_entities)
     missing_entities = _entity_mismatches(source, target, protected)
     if missing_entities:
         return FidelityFinding(BLOCKED, (ENTITY_CHANGED,), tuple(missing_entities))
 
-    missing_numbers = _quantity_mismatches(source, target) or _quantity_word_conflict(
-        source, target
+    missing_numbers = _quantity_mismatches(source, target) or (
+        _quantity_word_conflict(source, target) if english_rules else ()
     )
     if missing_numbers:
         return FidelityFinding(BLOCKED, (QUANTITY_CHANGED,), tuple(missing_numbers))
 
-    if _negation_asymmetry(source, target):
-        return FidelityFinding(VERIFY, (NEGATION_CHANGED,))
-    if _modality_tense_change(source, target):
-        return FidelityFinding(VERIFY, (MODALITY_TENSE_CHANGED,))
-    temporal = _temporal_relation_change(source, target)
-    if temporal == "inverted":
-        return FidelityFinding(BLOCKED, (TEMPORAL_RELATION_CHANGED,), (temporal,))
-    if temporal:
-        return FidelityFinding(VERIFY, (TEMPORAL_RELATION_CHANGED,), (temporal,))
-    if _state_replaced_action(source, target):
-        return FidelityFinding(VERIFY, (STATE_ACTION_CHANGED,))
+    if english_rules:
+        if _negation_asymmetry(source, target):
+            return FidelityFinding(VERIFY, (NEGATION_CHANGED,))
+        if _modality_tense_change(source, target):
+            return FidelityFinding(VERIFY, (MODALITY_TENSE_CHANGED,))
+        temporal = _temporal_relation_change(source, target)
+        if temporal == "inverted":
+            return FidelityFinding(BLOCKED, (TEMPORAL_RELATION_CHANGED,), (temporal,))
+        if temporal:
+            return FidelityFinding(VERIFY, (TEMPORAL_RELATION_CHANGED,), (temporal,))
+        if _state_replaced_action(source, target):
+            return FidelityFinding(VERIFY, (STATE_ACTION_CHANGED,))
     known = protected + tuple(
         entity for entity in _entities_present(source, proper_names)
         if entity not in protected
@@ -1197,46 +1213,39 @@ def evaluate_local_fidelity(
     # Nothing about the *meaning* is provably wrong. What is left is doubt about
     # the inputs and the surface form: reported, never blocked, because holding
     # the region here would put untranslated English back on the page.
-    suspicious = suspicious_source_tokens(
-        source, target, known_entities=known, is_source_word=is_source_word
-    )
-    if suspicious:
-        return FidelityFinding(REVIEW, (SOURCE_OCR_SUSPICIOUS,), suspicious)
-    # The word-segmentation repair ran and still left glued runs behind. The
-    # pipeline is saying, in its own provenance, that it does not know where the
-    # source words are. Nothing built on a source with unresolved collapsed
-    # boundaries can be verified, so it renders under review and never clean.
-    runs = (
-        unsegmented_source_runs(source)
-        if "segment" in str(source_repair_reason or "")
-        # No provenance reached this gate, which on the real corpus means the
-        # repair recorded itself somewhere else, not that it never ran. The
-        # residual proves the collapse on its own.
-        else collapsed_source_runs(source)
-    )
-    if runs:
-        # The collapse is real either way. What decides usability is whether it
-        # reached the candidate: unreadable debris on the page, malformed
-        # Portuguese, or a sense nothing supports all mean nobody can check the
-        # result against anything. None of those, and every rule above already
-        # passed, is the strongest evidence this pipeline has that the provider
-        # recovered the sentence - so the region renders, under review, with the
-        # segmentation uncertainty recorded in its own reason code.
-        unresolved = (
-            unresolved_run_debris(runs, target)
-            or _malformed_portuguese(target)
-            or word_sense_conflicts(source, target, context_texts)
+    if english_rules:
+        suspicious = suspicious_source_tokens(
+            source, target, known_entities=known, is_source_word=is_source_word
         )
-        code = SOURCE_SEGMENTATION_INCOMPLETE if unresolved else SOURCE_SEGMENTATION_RECOVERED
-        return FidelityFinding(REVIEW, (code,), runs[:4])
+        if suspicious:
+            return FidelityFinding(REVIEW, (SOURCE_OCR_SUSPICIOUS,), suspicious)
+        # The word-segmentation repair ran and still left glued runs behind. The
+        # pipeline is saying, in its own provenance, that it does not know where the
+        # source words are. Nothing built on a source with unresolved collapsed
+        # boundaries can be verified, so it renders under review and never clean.
+        runs = (
+            unsegmented_source_runs(source)
+            if "segment" in str(source_repair_reason or "")
+            # No provenance reached this gate, which on the real corpus means the
+            # repair recorded itself somewhere else, not that it never ran. The
+            # residual proves the collapse on its own.
+            else collapsed_source_runs(source)
+        )
+        if runs:
+            unresolved = (
+                unresolved_run_debris(runs, target)
+                or _malformed_portuguese(target)
+                or word_sense_conflicts(source, target, context_texts)
+            )
+            code = SOURCE_SEGMENTATION_INCOMPLETE if unresolved else SOURCE_SEGMENTATION_RECOVERED
+            return FidelityFinding(REVIEW, (code,), runs[:4])
     malformed = _malformed_portuguese(target)
     if malformed:
         return FidelityFinding(REVIEW, (GRAMMAR_MALFORMED,), (malformed,))
-    # Last, because it is the only rule that reads anything outside this region:
-    # everything provable about the region alone has already had its say.
-    senses = word_sense_conflicts(source, target, context_texts)
-    if senses:
-        return FidelityFinding(REVIEW, (WORD_SENSE_CONTEXT_MISMATCH,), senses[:4])
+    if english_rules:
+        senses = word_sense_conflicts(source, target, context_texts)
+        if senses:
+            return FidelityFinding(REVIEW, (WORD_SENSE_CONTEXT_MISMATCH,), senses[:4])
     return FidelityFinding()
 
 

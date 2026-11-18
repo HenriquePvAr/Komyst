@@ -1101,6 +1101,21 @@ tradutor.
     gravando `gpu_vram_used_mb`, `gpu_vram_used_mb_avg` e `gpu_vram_used_mb_peak` no relatório.
   - `_inpaint_change_metrics`, `changed_pixels_in_fill_halo` e o hash de cache de `_learned_inpaint`
     passam a operar em ROI local com verificação `np.array_equal` nas faixas externas.
+- **Contexto de cena na DeepL, retry em `wallet-reserve` e fidelidade semântica multilíngue (2026-11-17, IMPLEMENTADO):**
+  - `komyst_backend_provider.py` monta `context` limitado (`<= 2000` caracteres, não tarifado pela
+    DeepL) a partir das falas vizinhas do lote e envia no payload de `/functions/v1/translation-execute`;
+    `supabase/functions/translation-execute/index.ts` encaminha `context` para `/v2/translate` da
+    DeepL (PUBLICAÇÃO REMOTA PENDENTE — `EXTERNAL_GATE`, retrocompatível com a Edge Function atual).
+  - `HttpBackendClient.reserve` faz até 2 tentativas extras (`0,6 s` e `1,2 s`) apenas em falhas
+    transitórias `backend_transport_failed`, aproveitando a idempotência de `(job_id, request_id)`.
+  - `_looks_like_noise` e `_is_weak_ocr_line` passam a preservar sílabas/ideogramas curtos em
+    escrita não latina (ex.: `"예,"`, `"예."`, `"네"`, `"え?"`, `"好!"`), evitando descarte como
+    ruído ou re-OCR desnecessário em 100 % das linhas CJK/cirílicas.
+  - `semantic_fidelity.evaluate_local_fidelity` restringe gatilhos lexicais exclusivos do inglês
+    (`before`/`after`, negação inglesa, gerúndios `-ing`, runs colados) à origem inglesa, mantendo
+    invariantes numéricos (`numeric_values`), entidades protegidas e gramática pt-BR em todos os
+    idiomas; `portuguese_words.unknown_target_words` não reprova nomes próprios romanizados em
+    Title-Case vindos de escritas não latinas.
 - `clean_ocr_text` troca o glifo `0` por `O` em tokens ASCII com pelo menos duas letras e
   sem outros dígitos; identificadores com outros números permanecem intactos. Essa
   normalização não usa nomes ou palavras específicas.

@@ -28,6 +28,22 @@ window.BOARD = {
   },
   cards: [
     {
+      id: 'STAGE4-CONTEXT-FIDELITY-DOCS-20261117',
+      title: 'Etapa 4 — Contexto DeepL, retry idempotente em wallet-reserve, fidelidade/ruído multilíngue e revisão documental',
+      domain: 'pipeline',
+      column: 'dev',
+      env: 'branch',
+      updated: '2026-11-17',
+      summary: 'Envia parâmetro context limitado à DeepL via komyst_backend_provider + translation-execute; adiciona retry curto de transporte em wallet-reserve; preserva sílabas únicas CJK/Hangul ("예,", "예.") em _looks_like_noise e _is_weak_ocr_line; isola regras lexicais inglesas em semantic_fidelity e romanizações Title-Case em portuguese_words; corrige escapes de controle e âncoras na documentação.',
+      risk: 'TESTED_OFFLINE: 124 testes passando (test_stage4_context_and_multilang_fidelity, test_multilingual_ocr, semantic_fidelity, komyst_backend e portuguese_words). EXTERNAL_GATE: deploy remoto de supabase/functions/translation-execute para ativar o encaminhamento de context no servidor; execução física do capítulo coreano aguardando login na sessão local.',
+      blockedBy: 'Login do usuário na aba http://127.0.0.1:8080 para disparar o capítulo coreano real; publicação remota opcional da Edge Function translation-execute.',
+      delivered: [
+        'Parâmetro context limitado em BatchRequest / translation-execute + retry idempotente (3x) em wallet-reserve',
+        'Preservação de interjeições CJK de 1 sílaba + corte de falsos positivos ingleses em semantic_fidelity e unknown_target_words',
+        'Correção de \\x08 em CONFIGURATION.md, quebra de linha em LOCAL_FOLDER_INPUT.md e sumário/pré-requisitos em GUIA_DO_USUARIO.md'
+      ]
+    },
+    {
       id: 'STAGE3-VRAM-LAMA-FLUX-20261117',
       title: 'Etapa 3 — Escala/buckets fixos do LaMa DirectML, descarga de VRAM antes do FLUX, telemetria PDH de VRAM e métricas ROI de inpaint',
       domain: 'pipeline',

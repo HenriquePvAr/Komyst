@@ -117,9 +117,10 @@ Deno.serve(async (req) => {
   if (!key) return json({ code: "provider_not_configured" }, 503);
   const base = Deno.env.get("DEEPL_API_BASE_URL") || (key.endsWith(":fx") ? "https://api-free.deepl.com" : "https://api.deepl.com");
   if (!ALLOWED_BASES.has(base)) return json({ code: "provider_configuration_invalid" }, 503);
+  const contextText = typeof body?.context === "string" && body.context.trim() ? body.context.trim().slice(0, 4000) : "";
   let response: Response;
   try {
-    response = await fetch(`${base}/v2/translate`, { method: "POST", headers: { Authorization: `DeepL-Auth-Key ${key}`, "Content-Type": "application/json" }, body: JSON.stringify({ text: items.map((i: any) => i.text), source_lang: String(body?.source_lang || "JA").toUpperCase(), target_lang: String(body?.target_lang || "PT-BR").toUpperCase(), model_type: "quality_optimized", show_billed_characters: true, preserve_formatting: true }) });
+    response = await fetch(`${base}/v2/translate`, { method: "POST", headers: { Authorization: `DeepL-Auth-Key ${key}`, "Content-Type": "application/json" }, body: JSON.stringify({ text: items.map((i: any) => i.text), source_lang: String(body?.source_lang || "JA").toUpperCase(), target_lang: String(body?.target_lang || "PT-BR").toUpperCase(), model_type: "quality_optimized", show_billed_characters: true, preserve_formatting: true, ...(contextText ? { context: contextText } : {}) }) });
   } catch { return json({ code: "provider_outcome_unknown", request_id: requestId }, 502); }
   const payload: any = await response.json().catch(() => ({}));
   if (!response.ok) {

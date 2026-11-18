@@ -183,7 +183,7 @@ quebrada, onde o interior branco medido na limpeza falha. Sem detecção que con
 comportamento é o de sempre. Os pesos **não são empacotados**: baixe `detector.onnx` de
 `ogkalu/comic-text-and-bubble-detector` (Hugging Face, Apache-2.0, SHA-256
 `065744e91c0594ad8663aa8b870ce3fb27222942eded5a3cc388ce23421bd195`) para
-`<dados>\modelsubble\detector.onnx` (ou aponte `BUBBLE_DETECTOR_MODEL`). Modelo ausente
+`<dados>\models\bubble\detector.onnx` (ou aponte `BUBBLE_DETECTOR_MODEL`). Modelo ausente
 equivale a desligado. `BUBBLE_DETECTOR_MIN_SCORE` (default `0.35`, só no código) é o corte de
 confiança. Usa DirectML (sob `DIRECTML_LOCK`) com CPU de reserva.
 

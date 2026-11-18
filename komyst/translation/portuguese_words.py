@@ -14,6 +14,9 @@ import re
 import unicodedata
 
 _WORD = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+")
+_NON_LATIN_SCRIPT_RE = re.compile(
+    r"[\u0400-\u04ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]"
+)
 MIN_WORD_LENGTH = 4
 
 
@@ -49,10 +52,17 @@ def unknown_target_words(translation: str, source: str = "") -> list[str]:
     source_words = {_fold(word) for word in _WORD.findall(str(source or ""))}
     # Glued source tokens ("SEOKJINKIM") still carry the name the translation splits out.
     source_letters = re.sub(r"[^A-Z]", "", _fold(source))
+    non_latin_source = bool(_NON_LATIN_SCRIPT_RE.search(str(source or "")))
+    target_text = str(translation or "")
+    mixed_case_target = any(ch.islower() for ch in target_text)
     unknown = []
-    for word in _WORD.findall(str(translation or "")):
+    for word in _WORD.findall(target_text):
         key = unicodedata.normalize("NFC", word.upper())
         folded = _fold(key)
+        if non_latin_source and word[0].isupper() and (mixed_case_target or len(_WORD.findall(target_text)) <= 2) and not (mixed_case_target and word.isupper() and len(word) >= 4):
+            # Romanized proper nouns from non-Latin scripts ("Baekpyo", "Myeongju")
+            # have no Latin counterpart in the source text by construction.
+            continue
         if (len(key) < MIN_WORD_LENGTH or key in vocabulary or folded in vocabulary or folded in source_words
                 or folded in source_letters or is_english_word(folded)
                 or _diminutive_of_known_word(folded, vocabulary)):

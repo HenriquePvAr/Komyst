@@ -14,7 +14,7 @@ O nome exibido pelo aplicativo é **Komyst**.
 1. [O que o Komyst faz](#1-o-que-o-komyst-faz)
 2. [O que a Beta atual já permite](#2-o-que-a-beta-atual-já-permite)
 3. [O que você precisa no computador](#3-o-que-você-precisa-no-computador)
-4. [Como instalar hoje](#4-como-instalar-hoje)
+4. [Como instalar](#4-como-instalar)
 5. [Abrindo o programa pela primeira vez](#5-abrindo-o-programa-pela-primeira-vez)
 6. [Entrando na sua conta](#6-entrando-na-sua-conta)
 7. [Conhecendo as telas](#7-conhecendo-as-telas)
@@ -93,8 +93,7 @@ de 8 GB; isso não é um mínimo homologado nem uma promessa de tempo por capít
 - **Conexão com a internet** durante a tradução;
 - Espaço livre em disco — um capítulo completo com imagens, páginas redesenhadas e PDF
   pode ocupar algumas centenas de megabytes;
-- Uma **conta** para entrar no programa;
-- Uma **chave do serviço de tradução** (fornecida junto com o acesso à Beta).
+- Uma **conta** com acesso Beta ativo e saldo de **Komyst Keys (YK)** para executar traduções.
 
 ## 4. Como instalar
 

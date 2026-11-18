@@ -4443,9 +4443,10 @@ def _looks_like_noise(text):
     if not compact:
         return True
 
-    # Two Latin letters are rarely a word; two kana/Han/Hangul characters usually are ("ない").
+    # Two Latin letters are rarely a word; two kana/Han/Hangul characters ("ない") or a
+    # single CJK/Hangul syllable/ideograph ("예,", "예.", "え?", "好") are real words.
     if (len(compact) <= 2 and compact.upper() not in SHORT_REAL_TEXTS
-            and len(_NON_LATIN_SCRIPT.findall(compact)) < 2):
+            and len(_NON_LATIN_SCRIPT.findall(compact)) < 1):
         return True
 
     # Censorship masks (a letter followed by * or #, e.g. "D***", "H#**") are
@@ -9187,9 +9188,13 @@ def _recognize_single_row(engine, crop, page_index=None):
         return []
     lines = []
     for item in result or []:
-        if not item or len(item) < 2:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
             continue
-        text, confidence = str(item[0] or ""), float(item[1] or 0.0)
+        text = str(item[0] or "")
+        try:
+            confidence = float(item[1] or 0.0)
+        except (TypeError, ValueError):
+            continue
         if not text.strip():
             continue
         box = (0, 0, int(crop.shape[1]), int(crop.shape[0]))
@@ -9234,8 +9239,12 @@ _CONTINUATION_ANCHOR_MIN_CONFIDENCE = 0.85
 
 def _is_weak_ocr_line(line):
     """A reading too short or unsure to vouch for the pixels it sits on ("T", 0.67)."""
-    return (float(line.confidence or 0.0) < 0.8
-            or len(re.sub(r"[^A-Za-z0-9]", "", clean_ocr_text(line.text))) < 2)
+    if float(line.confidence or 0.0) < 0.8:
+        return True
+    cleaned = clean_ocr_text(line.text)
+    if _NON_LATIN_SCRIPT_CHARS_RE.search(cleaned):
+        return False
+    return len(re.findall(r"[^\W_]", cleaned, flags=re.UNICODE)) < 2
 
 
 def _stroke_widths(ink):
@@ -11733,6 +11742,7 @@ def _maybe_naturalize_translation(
             is_source_word=_token_is_source_vocabulary,
             source_repair_reason=str(getattr(group, "repair_reason", "")),
             context_texts=tuple(getattr(group, "page_context_texts", ()) or ()),
+            source_lang=str(getattr(group, "_validation_source_lang", "") or "en"),
         )
         post_budget = {"verifier_calls": 0}
         # Same rule as the terminology retry: the verdict below is about the
@@ -11840,6 +11850,7 @@ def _fidelity_reason_for(
         is_source_word=_token_is_source_vocabulary,
         source_repair_reason=str(getattr(group, "repair_reason", "")),
         context_texts=tuple(getattr(group, "page_context_texts", ()) or ()),
+        source_lang=str(getattr(group, "_validation_source_lang", "") or "en"),
     )
     # Every verdict is about *this* candidate: a retry that cleared the doubt must
     # not inherit the rejected candidate's review flag.
@@ -12055,8 +12066,15 @@ def validate_and_retry_translations(
     # page is the bound: no chapter is ever assembled, and nothing here reaches a
     # provider prompt - it only decides which sense of an ambiguous word the
     # scene supports.
+    effective_source_lang = str(
+        getattr(translator, "source_lang", "")
+        or getattr(getattr(translator, "provider", None), "source_lang", "")
+        or (source_recovery_context or {}).get("ocr_lang")
+        or "en"
+    )
     page_texts = [str(other.text or "") for other in groups if str(other.text or "").strip()]
     for group in groups:
+        group._validation_source_lang = effective_source_lang
         group.page_context_texts = tuple(
             text for text in page_texts if text != str(group.text or "")
         )
