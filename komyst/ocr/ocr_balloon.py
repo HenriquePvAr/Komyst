@@ -9422,14 +9422,21 @@ def _container_text_gap_boxes(image_bgr, lines):
         # only this container's: the crop reaches neighbouring text, and leaving
         # it in would rediscover lines that were read perfectly well.
         for line in lines:
-            lx, ly, lw, lh = line.box
-            margin = max(3, int(lh * 0.25))
-            cx1 = max(0, int(lx) - x1 - margin)
-            cy1 = max(0, int(ly) - y1 - margin)
-            cx2 = min(crop.shape[1], int(lx + lw) - x1 + margin)
-            cy2 = min(crop.shape[0], int(ly + lh) - y1 + margin)
+            lx, ly, lw, lh = [int(v) for v in line.box]
+            cx1 = max(0, lx - x1)
+            cy1 = max(0, ly - y1)
+            cx2 = min(crop.shape[1], lx + lw - x1)
+            cy2 = min(crop.shape[0], ly + lh - y1)
             if cx2 > cx1 and cy2 > cy1:
-                dark[cy1:cy2, cx1:cx2] = 0
+                # Clear only the ink rows of this line (detector boxes carry ~25% unclip
+                # padding that otherwise wipes out tightly packed neighbour rows).
+                line_ink = dark[cy1:cy2, cx1:cx2] > 0
+                if np.any(line_ink):
+                    iy = np.where(line_ink.any(axis=1))[0]
+                    pad_i = 1
+                    dark[max(0, cy1 + int(iy[0]) - pad_i):min(crop.shape[0], cy1 + int(iy[-1]) + 1 + pad_i), cx1:cx2] = 0
+                else:
+                    dark[cy1:cy2, cx1:cx2] = 0
         count, _, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
         glyphs = []
         for label in range(1, count):
@@ -9742,17 +9749,69 @@ def apply_speech_container_reocr(original_bgr, raw_lines, ocr_lang, page_index=N
     return lines, records
 
 
-def _recover_adjacent_unread_rows(original_bgr, lines, ocr_lang, page_index=None):
-    """Read a short row the detector skipped right above or below a read line.
+def _tight_line_ink_box(gray, box):
+    x, y, w, h = [int(v) for v in box]
+    H, W = gray.shape[:2]
+    x1, y1, x2, y2 = max(0, x), max(0, y), min(W, x + w), min(H, y + h)
+    core_pad = min(max(0, (y2 - y1 - 6) // 2), int(round((y2 - y1) * 0.18)))
+    core_y1, core_y2 = y1 + core_pad, y2 - core_pad
+    roi = gray[y1:y2, x1:x2]
+    if roi.size == 0 or roi.shape[0] < 4 or roi.shape[1] < 4:
+        return (x1, core_y1, max(1, x2 - x1), max(4, core_y2 - core_y1)), max(6.0, h * 0.52)
+    _t, ink = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    if float(np.median(roi)) < 127:
+        ink = cv2.bitwise_not(ink)
+    cnt, _lbl, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    comp_hs = [
+        int(stats[i, cv2.CC_STAT_HEIGHT])
+        for i in range(1, cnt)
+        if 4 <= int(stats[i, cv2.CC_STAT_HEIGHT]) < roi.shape[0]
+        and int(stats[i, cv2.CC_STAT_WIDTH]) <= 2.5 * h
+        and int(stats[i, cv2.CC_STAT_AREA]) >= 6
+    ]
+    if not comp_hs:
+        return (x1, core_y1, max(1, x2 - x1), max(4, core_y2 - core_y1)), max(6.0, h * 0.52)
+    glyph_h = float(np.median(comp_hs))
+    ys = [
+        (int(stats[i, cv2.CC_STAT_TOP]), int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]))
+        for i in range(1, cnt)
+        if 0.45 * glyph_h <= int(stats[i, cv2.CC_STAT_HEIGHT]) <= 1.6 * glyph_h
+        and int(stats[i, cv2.CC_STAT_AREA]) >= 6
+    ]
+    if not ys:
+        return (x1, core_y1, max(1, x2 - x1), max(4, core_y2 - core_y1)), glyph_h
+    ty1 = y1 + min(a for a, _ in ys)
+    ty2 = y1 + max(b for _, b in ys)
+    return (x1, ty1, max(1, x2 - x1), max(4, ty2 - ty1)), glyph_h
 
-    "SO" (two italic letters) over "COLD..." was never detected: it stayed on the
-    page in English beside the Portuguese "FRIO...". Ink components with the line's
-    glyph height (0.6-1.3 h), in the same column (within 0.6 w of the line on either
-    side), one row away (up to 1.8 h) and covered by no detected box form the
-    candidate row; it is read with the recogniser alone and kept only if made of
-    common English words (the guard: a stroke of the art never reads as one) at a
-    recogniser confidence >= 0.6 (two italic letters read "SO" at 0.68).
+
+def _word_valid_for_recovered_row(word: str, is_english_word, word_zipf) -> bool:
+    raw = str(word or "").strip("'’")
+    if not raw:
+        return False
+    bare = re.sub(r"['’]", "", raw)
+    if is_english_word(bare) or word_zipf(bare) >= 3.0:
+        return True
+    stem = re.sub(r"(?:N['’]T|['’](?:S|D|LL|RE|VE|M))$", "", raw, flags=re.IGNORECASE)
+    stem_bare = re.sub(r"[^A-Za-z]", "", stem)
+    if stem_bare and stem_bare != bare and (
+        stem_bare.upper() in {"CA", "WO", "SHA", "AI"}
+        or is_english_word(stem_bare)
+        or word_zipf(stem_bare) >= 3.0
+    ):
+        return True
+    return False
+
+
+def _recover_adjacent_unread_rows(original_bgr, lines, ocr_lang, page_index=None):
+    """Read a short or tightly packed row the detector skipped above/below a read line.
+
+    Detector boxes carry ~25% unclip padding around the glyphs, so measuring from raw
+    ``box`` overlapped tightly packed comic rows (10-12 px glyphs in 24 px boxes) and
+    rejected their 11 px glyphs against ``0.6 * 24``. Measuring tight ink bounds and
+    glyph height recovers skipped middle rows cleanly and chains up to 2 hops.
     """
+    from komyst.ocr import ocr_models
     from komyst.review.region_taxonomy import is_english_word, word_zipf
 
     gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
@@ -9761,75 +9820,123 @@ def _recover_adjacent_unread_rows(original_bgr, lines, ocr_lang, page_index=None
     engines = None
     record = {"trigger": "recover_adjacent_row", "page": page_index, "accepted": False,
               "reason": "no_unread_adjacent_row", "engine_errors": errors}
-    boxes = [tuple(int(v) for v in line.box) for line in lines]
+    tight_infos = [_tight_line_ink_box(gray, line.box) for line in lines]
+    tight_boxes = [tb for tb, _ in tight_infos]
+    queue = [(tb, gh, 0) for tb, gh in tight_infos]
     recovered = []
-    for x, y, w, h in list(boxes):
-        if h < 8:
+    idx = 0
+    while idx < len(queue):
+        (x, ty, w, th), glyph_h, hop = queue[idx]
+        idx += 1
+        if th < 5 or glyph_h < 5:
             continue
-        for y1, y2 in ((max(0, y - int(1.8 * h)), y), (y + h, min(height, y + h + int(1.8 * h)))):
-            x1, x2 = max(0, x - int(0.6 * w)), min(width, x + w + int(0.6 * w))
+        reach = max(int(round(2.1 * glyph_h)), int(round(1.6 * th)))
+        for y1, y2 in ((max(0, ty - reach), ty), (ty + th, min(height, ty + th + reach))):
+            x1, x2 = max(0, x - max(24, int(0.8 * w))), min(width, x + w + max(24, int(0.8 * w)))
             band = gray[y1:y2, x1:x2]
-            if band.size == 0 or band.shape[0] < int(0.6 * h):
+            if band.size == 0 or band.shape[0] < max(5, int(0.55 * glyph_h)):
                 continue
             _t, ink = cv2.threshold(band, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
             if float(np.median(band)) < 127:
                 ink = cv2.bitwise_not(ink)
+            # Exclude pixels already owned by any known line's tight ink box.
+            for bx, by, bw, bh in tight_boxes:
+                ox1, oy1 = max(0, bx - x1 - 1), max(0, by - y1 - 1)
+                ox2, oy2 = min(ink.shape[1], bx + bw - x1 + 1), min(ink.shape[0], by + bh - y1 + 1)
+                if ox2 > ox1 and oy2 > oy1:
+                    ink[oy1:oy2, ox1:ox2] = 0
             count, _labels, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
             glyphs = []
             for label in range(1, count):
-                cx, cy, cw, ch, _area = [int(v) for v in stats[label]]
+                cx, cy, cw, ch, area = [int(v) for v in stats[label]]
                 gx1, gy1 = x1 + cx, y1 + cy
-                if not (0.6 * h <= ch <= 1.3 * h) or cw > 2.5 * h:
+                if not (max(5.0, 0.55 * glyph_h) <= ch <= 1.55 * glyph_h) or cw > 3.0 * glyph_h or area < 6:
                     continue
-                if any(not (gx1 + cw <= bx or gx1 >= bx + bw or gy1 + ch <= by or gy1 >= by + bh)
-                       for bx, by, bw, bh in boxes):
-                    continue
+                if cx <= 0 or cx + cw >= band.shape[1]:
+                    continue  # spans to band edge: balloon border or panel frame
                 glyphs.append((gx1, gy1, cw, ch))
             if not glyphs:
                 continue
-            # One row: glyphs sharing the rows of the tallest one, joined by word gaps.
-            glyphs.sort()
-            anchor = max(glyphs, key=lambda g: g[3])
+            # Pick the nearest unread row to ``ty`` (using a full-height glyph as anchor)
+            # so multi-row gaps recover one complete horizontal row per hop.
+            ref_y = ty if y2 <= ty else ty + th
+            tall_glyphs = [g for g in glyphs if g[3] >= 0.72 * glyph_h] or glyphs
+            nearest_g = min(tall_glyphs, key=lambda g: abs((g[1] + 0.5 * g[3]) - ref_y))
+            near_band = [
+                g for g in glyphs
+                if abs((g[1] + 0.5 * g[3]) - (nearest_g[1] + 0.5 * nearest_g[3])) <= 0.65 * glyph_h
+            ]
+            anchor = max(near_band, key=lambda g: g[3])
             row = [g for g in glyphs if min(g[1] + g[3], anchor[1] + anchor[3]) - max(g[1], anchor[1])
-                   >= 0.5 * min(g[3], anchor[3])]
+                   >= 0.4 * min(g[3], anchor[3])]
+            # Restrict horizontally to the cluster overlapping/nearest the parent line ``[x, x+w]``
+            row.sort(key=lambda g: g[0])
+            clusters = [[row[0]]]
+            for g in row[1:]:
+                if g[0] - (clusters[-1][-1][0] + clusters[-1][-1][2]) <= max(22.0, 3.2 * glyph_h):
+                    clusters[-1].append(g)
+                else:
+                    clusters.append([g])
+            row = min(
+                clusters,
+                key=lambda cl: max(0, cl[0][0] - (x + w), x - (cl[-1][0] + cl[-1][2])),
+            )
             rx1 = min(g[0] for g in row)
             rx2 = max(g[0] + g[2] for g in row)
             ry1 = min(g[1] for g in row)
             ry2 = max(g[1] + g[3] for g in row)
-            if rx2 - rx1 < 0.5 * h or any(not (rx2 <= bx or rx1 >= bx + bw or ry2 <= by or ry1 >= by + bh)
-                                          for bx, by, bw, bh in boxes):
+            if rx2 - rx1 < 0.5 * glyph_h:
+                continue
+            if any(
+                max(0, min(rx2, bx + bw) - max(rx1, bx)) * max(0, min(ry2, by + bh) - max(ry1, by))
+                > 0.25 * max(1, (rx2 - rx1) * (ry2 - ry1))
+                for bx, by, bw, bh in tight_boxes
+            ) or any(
+                min(ry2, int(ol.box[1] + ol.box[3])) - max(ry1, int(ol.box[1])) >= 0.72 * max(1, ry2 - ry1)
+                and min(rx2, int(ol.box[0] + ol.box[2])) - max(rx1, int(ol.box[0])) >= 0.5 * max(1, rx2 - rx1)
+                for ol in lines
+            ):
                 continue
             if engines is None:
                 engines = _reocr_engines_for(ocr_lang, errors)
             if not engines:
                 return lines, record
-            # A tight crop: extra margin lowered the recogniser on short words.
-            pad = max(2, h // 12)
+            pad = max(2, int(round(glyph_h * 0.25)))
             box = (max(0, rx1 - pad), max(0, ry1 - pad),
                    min(width, rx2 + pad) - max(0, rx1 - pad), min(height, ry2 + pad) - max(0, ry1 - pad))
             read = _recognize_single_row(
                 engines[0], original_bgr[box[1]:box[1] + box[3], box[0]:box[0] + box[2]], page_index)
-            from komyst.ocr import ocr_models
 
             text = clean_ocr_text(read[0].text) if read else ""
+            raw_letters = re.findall(r"[A-Za-z]", text)
+            if len(raw_letters) <= 2 and box[2] > 3.5 * max(1, box[3]):
+                continue  # wide art stroke misread as 1-2 letters ("SD")
             if ocr_models.source_is_english(ocr_lang):
-                words = re.findall(r"[A-Za-z']+", text)
+                words = re.findall(r"[A-Za-z'’]+", text)
+                valid_count = sum(_word_valid_for_recovered_row(word, is_english_word, word_zipf) for word in words)
                 valid_row = bool(
                     read and float(read[0].confidence) >= 0.6 and words
                     and sum(len(re.sub(r"[^A-Za-z]", "", word)) for word in words) >= 2
-                    and all(is_english_word(word.replace("'", "")) or word_zipf(word.replace("'", "")) >= 3.0
-                            for word in words)
+                    and (
+                        valid_count == len(words)
+                        or (len(words) >= 3 and float(read[0].confidence) >= 0.80 and valid_count * 4 >= len(words) * 3)
+                    )
                 )
             else:
                 letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
                 valid_row = bool(read and float(read[0].confidence) >= 0.70 and len(letters) >= 2)
             if not valid_row:
                 continue
-            recovered.append(OCRLine(text=text, confidence=float(read[0].confidence),
-                                     polygon=_polygon_from_box(box), box=box, raw_text=read[0].text,
-                                     engine=lines[0].engine, page=page_index,
-                                     metadata={"recovered_adjacent_row": True}))
-            boxes.append(box)
+            new_line = OCRLine(text=text, confidence=float(read[0].confidence),
+                               polygon=_polygon_from_box(box), box=box, raw_text=read[0].text,
+                               engine=lines[0].engine, page=page_index,
+                               metadata={"recovered_adjacent_row": True})
+            new_line.ocr_lang = getattr(lines[0], "ocr_lang", "") or ocr_lang
+            recovered.append(new_line)
+            tb_new, gh_new = _tight_line_ink_box(gray, box)
+            tight_boxes.append(tb_new)
+            if hop < 2:
+                queue.append((tb_new, gh_new, hop + 1))
             record.setdefault("rows", []).append({"text": text, "box": list(box)})
     if not recovered:
         return lines, record
