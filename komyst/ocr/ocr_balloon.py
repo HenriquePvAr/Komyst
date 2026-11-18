@@ -2618,6 +2618,11 @@ def _line_box_mask(group, base_mask):
         x, y, w, h = (int(v) for v in line.box)
         pad = max(3, int(round(0.25 * h)))
         mask[max(0, y - pad):min(height, y + h + pad), max(0, x - pad):min(width, x + w + pad)] = 255
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if isinstance(enclosure, np.ndarray) and enclosure.shape == mask.shape and np.any(enclosure):
+        base_bool = np.asarray(base_mask) > 0
+        if not np.any(base_bool) or float(np.mean(enclosure[base_bool])) >= 0.80:
+            mask[~enclosure] = 0
     protect = getattr(group, "structure_protect_mask", None)
     if isinstance(protect, np.ndarray) and protect.shape == mask.shape:
         mask[protect > 0] = 0
@@ -2948,6 +2953,10 @@ def _clean_source_for_clean_artifact(current_bgr, original_bgr, group, *, precom
 
     rescued = {"cleaned": None}
     if last_resort_mask is not None and _last_resort_allowed(group):
+        if getattr(group, "light_enclosure_interior", None) is None:
+            group.light_enclosure_interior = _light_enclosure_interior(
+                original_bgr, group, getattr(group, "background_metrics", None) or {}
+            )
         # The line boxes first - every pixel of the lettering is rebuilt, so letters
         # fused with same-colour art (white letters touching light streaks or
         # drips) cannot survive outside an art-respecting mask, and neither
@@ -4594,7 +4603,7 @@ def _looks_like_noise(text):
     odd = sum(
         1
         for char in sanitized
-        if not (char.isalnum() or char in "'!?.,:; -\"“”‘’()")
+        if not (char.isalnum() or char in "'!?.,:; -\"“”‘’()…ー―〜~。、「」『』！？¿¡[]/")
     )
     if odd / max(1, len(sanitized)) > 0.28:
         return True
@@ -4746,7 +4755,7 @@ def _border_separates(border, line_box, group):
     gray, big = border
     height, width = gray.shape
 
-    def light_around(box):
+    def ring_p70(box):
         # The background around the box, not the box itself: white lettering with a dark
         # outline over dark art is light inside its box but sits on no balloon.
         x, y, w, h = (int(v) for v in box)
@@ -4757,15 +4766,17 @@ def _border_separates(border, line_box, group):
         outside = np.ones(window.shape, dtype=bool)
         outside[y - y1:y - y1 + h, x - x1:x - x1 + w] = False
         ring = window[outside]
-        return ring.size and float(np.percentile(ring, 70)) >= 200
+        return float(np.percentile(ring, 70)) if ring.size else 255.0
 
     lx, ly, lw, lh = (int(v) for v in line_box)
-    if not light_around(line_box):
-        return False
     center = np.array([lx + lw / 2.0, ly + lh / 2.0])
     nearest = min(group.lines, key=lambda item: float(np.hypot(
         item.box[0] + item.box[2] / 2.0 - center[0], item.box[1] + item.box[3] / 2.0 - center[1])))
-    if not light_around(nearest.box):
+    p70_line = ring_p70(line_box)
+    p70_near = ring_p70(nearest.box)
+    if (p70_line >= 200 and p70_near <= 135) or (p70_near >= 200 and p70_line <= 135):
+        return True
+    if not (p70_line >= 200 and p70_near >= 200):
         return False
     gx, gy, gw, gh = (int(v) for v in nearest.box)
     # Any convex balloon contains every segment joining corresponding interior points
@@ -4827,7 +4838,7 @@ def _group_lines(lines, page_index=None, image_bgr=None):
                     continue
                 if any(
                     _line_belongs_to_group(ln, groups[i])
-                    and not any(_border_separates(border, ln.box, TextGroup(group_id="", lines=[gl])) for gl in groups[i].lines)
+                    and not _border_separates(border, ln.box, groups[i])
                     for ln in groups[j].lines
                 ):
                     groups[i].lines = reading_order(groups[i].lines + groups[j].lines)
@@ -4905,7 +4916,7 @@ def _line_belongs_to_group(line, group):
     existing_areas = [item.box[2] * item.box[3] for item in group.lines]
     base_height = float(np.median(existing_heights)) if existing_heights else max(1, gh)
     base_area = float(np.median(existing_areas)) if existing_areas else max(1, gw * gh)
-    line_letters = len(re.sub(r"[^A-Za-z]", "", line.text or ""))
+    line_letters = len(re.sub(r"[^\W\d_]", "", line.text or "", flags=re.UNICODE))
     line_region_id = int((line.metadata or {}).get("visual_white_region_id") or 0)
     line_region_enclosed = bool(
         (line.metadata or {}).get("visual_white_region_enclosed")
@@ -4958,10 +4969,10 @@ def _line_belongs_to_group(line, group):
     # Short words only ("RUSTLE", "THUMP THUMP"): lettering 2.5x the height of
     # the text below it never shares a balloon with that text.
     if (
-        all(len(re.sub(r"[^A-Za-z]", "", item.text or "")) <= 12 for item in group.lines)
+        all(len(re.sub(r"[^\W\d_]", "", item.text or "", flags=re.UNICODE)) <= 12 for item in group.lines)
         and (
             base_height > lh * 2.5
-            or base_area > lw * lh * 6.0
+            or (base_height > lh * 1.65 and base_area > lw * lh * 6.0)
         )
     ):
         return False
@@ -5369,17 +5380,34 @@ def _boxes_adjacent(a, b, *, gap_factor=1.3):
     )
 
 
+def _boxes_cross_same_balloon(box_a, box_b) -> bool:
+    ax, ay, aw, ah = (int(v) for v in box_a)
+    bx, by, bw, bh = (int(v) for v in box_b)
+    ov_x = min(ax + aw, bx + bw) - max(ax, bx)
+    ov_y = min(ay + ah, by + bh) - max(ay, by)
+    if ov_x <= 0 or ov_y <= 0:
+        return False
+    return (
+        ov_x >= 0.85 * max(1, min(aw, bw))
+        and ov_y >= 0.85 * max(1, min(ah, bh))
+        and abs((ax + aw / 2.0) - (bx + bw / 2.0)) <= 0.35 * max(aw, bw)
+    )
+
+
 def _merge_contained_groups(groups):
     """Fold a group whose box lies inside another group's box into that group.
 
     OCR sometimes reads one big lettering twice (the full word and a fragment of
-    it); the fragment then becomes a second region drawn on top of the first.
+    it); the fragment then becomes a second region drawn on top of the first. Also
+    merges a wide middle row whose vertical span is straddled by top+bottom rows of
+    the same balloon (a '+' cross intersection).
     """
     merged = []
     for group in sorted(groups, key=lambda g: -(g.box[2] * g.box[3])):
         host = next(
             (other for other in merged
-             if _box_overlap_fraction(group.box, other.box) >= 0.9),
+             if _box_overlap_fraction(group.box, other.box) >= 0.9
+             or _boxes_cross_same_balloon(group.box, other.box)),
             None,
         )
         if host is None:
@@ -15457,27 +15485,49 @@ def _light_enclosure_interior(original_bgr, group, background_metrics):
     x2 = max(int(line.box[0] + line.box[2]) for line in lines)
     y2 = max(int(line.box[1] + line.box[3]) for line in lines)
     # Balloons are larger than their text; the window grows with the text block.
-    pad = max(3 * line_h, x2 - x1, y2 - y1)
+    pad = max(5 * line_h, int(round(1.8 * max(x2 - x1, y2 - y1))), 160)
     wx1, wy1, wx2, wy2 = max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)
     roi = gray[wy1:wy2, wx1:wx2]
-    level = float(np.median(np.asarray(
-        (background_metrics or {}).get("local_background_median_bgr") or [np.percentile(roi, 90)] * 3)))
-    light = (roi >= level - 40).astype(np.uint8)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(light, 4)
     box = np.zeros(roi.shape, dtype=bool)
     box[y1 - wy1:y2 - wy1, x1 - wx1:x2 - wx1] = True
-    inside_box = np.bincount(labels[box], minlength=count)
-    owners = [label for label in range(1, count) if inside_box[label] > 0.05 * np.count_nonzero(box)]
-    if not owners:
+    level = float(np.median(np.asarray(
+        (background_metrics or {}).get("local_background_median_bgr") or [np.percentile(roi, 90)] * 3)))
+    if np.any(box):
+        box_p75 = float(np.percentile(roi[box], 75))
+        box_p85 = float(np.percentile(roi[box], 85))
+        if box_p75 >= 215.0:
+            level = max(level, box_p85, 215.0)
+    if level < 185.0:
         return None
-    region = np.isin(labels, owners)
-    open_interior_edge = (
-        (wy1 > 0 and region[0, :].any())
-        or (wy2 < height and region[-1, :].any())
-        or (wx1 > 0 and region[:, 0].any())
-        or (wx2 < width and region[:, -1].any())
-    )
-    if open_interior_edge or np.count_nonzero(region) > 0.35 * (width * height):
+    region = None
+    for close_border in (False, True):
+        for delta in (40.0, 22.0, 12.0):
+            thresh = max(180.0, level - delta)
+            if close_border:
+                dark_wall = (roi < thresh).astype(np.uint8)
+                dark_wall = cv2.dilate(dark_wall, np.ones((3, 3), np.uint8))
+                dark_wall[box] = 0
+                light = (dark_wall == 0).astype(np.uint8)
+            else:
+                light = (roi >= thresh).astype(np.uint8)
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(light, 4)
+            inside_box = np.bincount(labels[box], minlength=count)
+            owners = [label for label in range(1, count) if inside_box[label] > 0.05 * np.count_nonzero(box)]
+            if not owners:
+                continue
+            cand_region = np.isin(labels, owners)
+            open_interior_edge = (
+                (wy1 > 0 and cand_region[0, :].any())
+                or (wy2 < height and cand_region[-1, :].any())
+                or (wx1 > 0 and cand_region[:, 0].any())
+                or (wx2 < width and cand_region[:, -1].any())
+            )
+            if not open_interior_edge and np.count_nonzero(cand_region) <= 0.35 * (width * height):
+                region = cand_region
+                break
+        if region is not None:
+            break
+    if region is None:
         return None  # not closed inside the window: no enclosure to clip to
     filled = region.astype(np.uint8) * 255
     contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -15749,6 +15799,23 @@ def _remove_text_for_group(
                 component_metrics["source_scoped_footprint_iterations"] = (
                     footprint_iterations
                 )
+    group.light_enclosure_interior = None
+    ring_level = float(np.median(np.asarray(
+        (background_metrics or {}).get("local_background_median_bgr") or [0, 0, 0])))
+    if config.CLEAN_CLIP_TO_ENCLOSURE:
+        gx_e, gy_e, gw_e, gh_e = (int(v) for v in group.box)
+        box_roi_e = original_bgr[
+            max(0, gy_e):min(original_bgr.shape[0], gy_e + max(1, gh_e)),
+            max(0, gx_e):min(original_bgr.shape[1], gx_e + max(1, gw_e)),
+        ]
+        box_light_e = bool(
+            box_roi_e.size
+            and float(np.percentile(cv2.cvtColor(box_roi_e, cv2.COLOR_BGR2GRAY), 75)) >= 215.0
+        )
+        if background_type in {"white_balloon", "narration_box"} or ring_level >= 200 or box_light_e:
+            group.light_enclosure_interior = _light_enclosure_interior(
+                original_bgr, group, background_metrics
+            )
     if not component_metrics.get("sfx_glyph_halo_mask"):
         dark_line_mask, dark_line_metrics = _uniform_dark_line_text_mask(
             original_bgr,
@@ -15833,19 +15900,13 @@ def _remove_text_for_group(
         component_metrics["mask_pixels_outside_source_evidence"] = int(
             np.count_nonzero((cleanup_mask > 0) & (source_evidence_mask == 0))
         )
-    group.light_enclosure_interior = None
-    ring_level = float(np.median(np.asarray(
-        (background_metrics or {}).get("local_background_median_bgr") or [0, 0, 0])))
-    if config.CLEAN_CLIP_TO_ENCLOSURE and (
-            background_type in {"white_balloon", "narration_box"} or ring_level >= 200):
-        enclosure = _light_enclosure_interior(original_bgr, group, background_metrics)
-        group.light_enclosure_interior = enclosure
-        if enclosure is not None:
-            clipped = int(np.count_nonzero((cleanup_mask > 0) & ~enclosure))
-            if clipped:
-                cleanup_mask = cleanup_mask.copy()
-                cleanup_mask[~enclosure] = 0
-            component_metrics["mask_pixels_clipped_to_enclosure"] = clipped
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if config.CLEAN_CLIP_TO_ENCLOSURE and enclosure is not None:
+        clipped = int(np.count_nonzero((cleanup_mask > 0) & ~enclosure))
+        if clipped:
+            cleanup_mask = cleanup_mask.copy()
+            cleanup_mask[~enclosure] = 0
+        component_metrics["mask_pixels_clipped_to_enclosure"] = clipped
     detector_view = original_bgr
     enclosure = getattr(group, "light_enclosure_interior", None)
     if isinstance(enclosure, np.ndarray) and np.any(enclosure):
@@ -16043,6 +16104,9 @@ def _remove_text_for_group(
         cleanup_mask, group, metrics,
         halo_barrier=_long_stroke_halo_barrier(original_bgr, group, cleanup_mask),
     )
+    if config.CLEAN_CLIP_TO_ENCLOSURE and isinstance(enclosure, np.ndarray) and enclosure.shape == cleanup_mask.shape:
+        cleanup_mask = cleanup_mask.copy()
+        cleanup_mask[~enclosure] = 0
     metrics["lettering_refined_before_fill"] = True
     metrics["mask_pixels"] = int(np.count_nonzero(cleanup_mask))
     metrics["mask_to_text_area_ratio"] = round(metrics["mask_pixels"] / text_area, 4)
@@ -16399,13 +16463,17 @@ def _reconstruction_gate_failure(original_bgr, cleaned, group, cleanup_mask, bac
         metrics["protected_effect_art_changed_pixels"] = count
         if count:
             return "protected_effect_art_changed"
-    ghost_metrics = _lettering_contour_ghost_metrics(
-        original_bgr,
-        cleaned,
-        cleanup_mask,
-        getattr(group, "structure_protect_mask", None),
-        getattr(group, "light_enclosure_interior", None),
-    )
+    bg_metrics = getattr(group, "background_metrics", {}) or {}
+    if bg_metrics.get("cleanup_fill_source") == "white_enclosure_paper_median":
+        ghost_metrics = {"lettering_contour_ghost": False}
+    else:
+        ghost_metrics = _lettering_contour_ghost_metrics(
+            original_bgr,
+            cleaned,
+            cleanup_mask,
+            getattr(group, "structure_protect_mask", None),
+            getattr(group, "light_enclosure_interior", None),
+        )
     metrics.update(ghost_metrics)
     if ghost_metrics.get("lettering_contour_ghost"):
         return "lettering_contour_ghost"
@@ -17813,7 +17881,7 @@ def _detached_light_text_components_mask(img_bgr, group, source_mask):
     line_heights = [line.box[3] for line in group.lines if line.box[3] > 0]
     median_height = float(np.median(line_heights)) if line_heights else group.box[3]
     horizontal_radius = max(16, min(64, int(median_height * 1.25)))
-    vertical_radius = max(3, min(10, int(median_height * 0.18)))
+    vertical_radius = max(6, min(18, int(median_height * 0.42)))
     near = cv2.dilate(
         source_mask,
         np.ones(
@@ -17823,12 +17891,21 @@ def _detached_light_text_components_mask(img_bgr, group, source_mask):
         iterations=1,
     )
 
-    x, y, w, h = _safe_draw_box(group.box, img_bgr.shape, group)
+    sx, sy, sw, sh = _safe_draw_box(group.box, img_bgr.shape, group)
+    pad_y = max(10, int(median_height * 0.85))
+    pad_x = max(8, int(median_height * 0.45))
+    x = max(0, sx - pad_x)
+    y = max(0, sy - pad_y)
+    w = min(img_bgr.shape[1] - x, sw + 2 * pad_x)
+    h = min(img_bgr.shape[0] - y, sh + 2 * pad_y)
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     bright = np.zeros_like(source_mask)
     bright[y : y + h, x : x + w] = (
         gray[y : y + h, x : x + w] >= 178
     ).astype(np.uint8) * 255
+    for nx, ny, nw, nh in getattr(group, "neighbor_text_boxes", None) or ():
+        bright[max(0, ny - 2):min(bright.shape[0], ny + nh + 2),
+               max(0, nx - 2):min(bright.shape[1], nx + nw + 2)] = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(bright, 8)
     selected = np.zeros_like(source_mask)
     components = 0
@@ -17976,10 +18053,17 @@ def _uniform_light_line_text_mask(img_bgr, group):
 
 
 def _detached_dark_text_components_mask(img_bgr, group, source_mask):
-    """Recover dark glyph edges omitted by OCR polygons on uniform white regions."""
+    """Recover dark glyph edges and unread interior lines omitted by OCR polygons on light regions."""
     metrics = getattr(group, "background_metrics", {}) or {}
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    has_enclosure = (
+        isinstance(enclosure, np.ndarray)
+        and enclosure.shape == source_mask.shape
+        and _inside_white_enclosure(img_bgr, group, source_mask)
+    )
     uniform_light = bool(
-        metrics.get("strongly_uniform_white")
+        has_enclosure
+        or metrics.get("strongly_uniform_white")
         or _proven_light_cleanup_region(metrics)
     )
     empty = np.zeros(source_mask.shape, dtype=np.uint8)
@@ -18001,7 +18085,16 @@ def _detached_dark_text_components_mask(img_bgr, group, source_mask):
         ),
         iterations=1,
     )
-    x, y, w, h = _safe_draw_box(group.box, img_bgr.shape, group)
+    sx, sy, sw, sh = _safe_draw_box(group.box, img_bgr.shape, group)
+    if has_enclosure:
+        pad_y = max(12, int(median_height * 0.95))
+        pad_x = max(18, int(max(median_height * 1.35, sw * 0.28)))
+        x = max(0, sx - pad_x)
+        y = max(0, sy - pad_y)
+        w = min(img_bgr.shape[1] - x, sw + 2 * pad_x)
+        h = min(img_bgr.shape[0] - y, sh + 2 * pad_y)
+    else:
+        x, y, w, h = sx, sy, sw, sh
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     dark = np.zeros_like(source_mask)
@@ -18009,6 +18102,13 @@ def _detached_dark_text_components_mask(img_bgr, group, source_mask):
         (gray[y : y + h, x : x + w] <= 190)
         & (hsv[y : y + h, x : x + w, 1] <= 80)
     ).astype(np.uint8) * 255
+    for nx, ny, nw, nh in getattr(group, "neighbor_text_boxes", None) or ():
+        dark[max(0, ny - 3):min(dark.shape[0], ny + nh + 3),
+             max(0, nx - 3):min(dark.shape[1], nx + nw + 3)] = 0
+    safe_encl = None
+    if has_enclosure:
+        safe_encl = cv2.erode(enclosure.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+        dark[~safe_encl] = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(dark, 8)
     selected = np.zeros_like(source_mask)
     max_area = max(1800, int(group.box[2] * group.box[3] * 0.08))
@@ -18019,15 +18119,44 @@ def _detached_dark_text_components_mask(img_bgr, group, source_mask):
     area = stats[:, cv2.CC_STAT_AREA]
     width = stats[:, cv2.CC_STAT_WIDTH]
     height = stats[:, cv2.CC_STAT_HEIGHT]
-    keep = (touches & (area >= 2) & (area <= max_area)
-            & (width >= 1) & (width <= max(24, int(median_height * 1.6)))
-            & (height >= 3) & (height <= max(28, int(median_height * 1.5))))
+    max_w = max(24, int(median_height * (2.6 if has_enclosure else 1.6)))
+    max_h = max(28, int(median_height * 1.5))
+    valid_shape = (
+        (area >= 2)
+        & (area <= max_area)
+        & (width >= 1)
+        & (width <= max_w)
+        & (height >= 3)
+        & (height <= max_h)
+    )
+    keep = touches & valid_shape
     keep[0] = False
+    if has_enclosure:
+        # Inside a closed white balloon eroded away from its border, chain one more
+        # hop so an omitted middle row or side word is cleaned completely.
+        encl_v = max(12, min(42, int(median_height * 0.95)))
+        encl_h = max(20, min(72, int(max(median_height * 1.5, sw * 0.25))))
+        seed_mask = cv2.bitwise_or(source_mask, (keep[labels]).astype(np.uint8) * 255)
+        for _ in range(2):
+            encl_near = cv2.dilate(
+                seed_mask,
+                np.ones((encl_v * 2 + 1, encl_h * 2 + 1), np.uint8),
+                iterations=1,
+            )
+            hop_touches = np.bincount(labels[missing & (encl_near > 0)], minlength=count) > 0
+            new_keep = (keep | (hop_touches & valid_shape))
+            new_keep[0] = False
+            if np.array_equal(new_keep, keep):
+                break
+            keep = new_keep
+            seed_mask = cv2.bitwise_or(source_mask, (keep[labels]).astype(np.uint8) * 255)
     components = int(np.count_nonzero(keep))
     if components:
         selected[keep[labels] & missing] = 255
     if np.any(selected):
         selected = cv2.dilate(selected, np.ones((3, 3), np.uint8), iterations=1)
+        if safe_encl is not None:
+            selected[~enclosure] = 0
     return selected, {
         "detached_dark_text_components": int(components),
         "detached_dark_text_pixels": int(np.count_nonzero(selected)),
@@ -18123,6 +18252,12 @@ def _apply_cleanup_mask(current_bgr, original_bgr, group, cleanup_mask, strategy
         classic = _apply_cleanup_mask_fill(
             current_bgr, original_bgr, group, cleanup_mask, strategy=strategy,
             accepted_candidate=accepted_candidate)
+        if (
+            classic is not None
+            and isinstance(getattr(group, "background_metrics", None), dict)
+            and group.background_metrics.get("cleanup_fill_source") == "white_enclosure_paper_median"
+        ):
+            return _draw_structure_continuations(classic, group, cleanup_mask)
     if learned is None and classic is not None and config.CLEAN_COMPARE_FILLS and strategy != "lama_large" \
             and not _inside_white_enclosure(current_bgr, group, cleanup_mask):
         if _classic_fill_is_trivially_safe(group):
@@ -18472,7 +18607,7 @@ def _inside_white_enclosure(image_bgr, group, cleanup_mask):
         return False
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     visible = gray[enclosure & ~(cv2.dilate(mask.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)]
-    return bool(visible.size and np.median(visible) >= 240 and np.percentile(visible, 10) >= 225)
+    return bool(visible.size and np.median(visible) >= 232 and np.percentile(visible, 15) >= 210)
 
 _LEARNED_FILL_CACHE = {}
 _LEARNED_FILL_CACHE_LOCK = threading.Lock()
@@ -19050,6 +19185,48 @@ def _apply_cleanup_mask_fill(current_bgr, original_bgr, group, cleanup_mask, str
         _mask_with_lettering_residue(group, original_bgr, cleanup_mask)
         if strategy != "caption_overlay" else (np.asarray(cleanup_mask) > 0).astype(np.uint8)
     )
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if (
+        strategy != "caption_overlay"
+        and config.WHITE_BALLOON_FLAT_FILL
+        and isinstance(enclosure, np.ndarray)
+        and enclosure.shape == fill_mask.shape[:2]
+        and _inside_white_enclosure(original_bgr, group, fill_mask)
+        and not (
+            config.CLEAN_SCREENTONE_DETECTION
+            and _screentone_around(
+                original_bgr,
+                fill_mask,
+                enclosure,
+                [tuple(int(v) for v in line.box) for line in _cleanup_lines_for_group(group)],
+            )
+        )
+    ):
+        visible_paper = enclosure.astype(bool) & ~(
+            cv2.dilate((fill_mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        )
+        if np.count_nonzero(visible_paper) >= 36:
+            paper_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)[visible_paper]
+            if float(np.percentile(paper_gray, 90) - np.percentile(paper_gray, 15)) <= 24.0:
+                bright_paper = visible_paper & (
+                    cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY) >= float(np.percentile(paper_gray, 50))
+                )
+                sample_paper = bright_paper if np.count_nonzero(bright_paper) >= 16 else visible_paper
+                enclosure_white_color = np.median(
+                    original_bgr[sample_paper], axis=0
+                ).astype(np.uint8)
+                base_u8 = (np.asarray(cleanup_mask) > 0).astype(np.uint8)
+                fill_mask = cv2.dilate((fill_mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8))
+                protect = getattr(group, "structure_protect_mask", None)
+                if isinstance(protect, np.ndarray) and protect.shape == fill_mask.shape:
+                    fill_mask[(protect > 0) & (base_u8 == 0)] = 0
+                fill_mask[~enclosure.astype(bool)] = 0
+                _record_fill_extension(group, fill_mask, base_u8)
+                result[fill_mask > 0] = enclosure_white_color
+                group.spatial_harmonic_gate_rejected = False
+                if isinstance(getattr(group, "background_metrics", None), dict):
+                    group.background_metrics["cleanup_fill_source"] = "white_enclosure_paper_median"
+                return result
     if spatial_gate_denies_constant and strategy != "caption_overlay":
         harmonic = _try_harmonic_boundary_fill(
             original_bgr, fill_mask, local_profile, spatial_class, group,
@@ -19180,14 +19357,23 @@ def _apply_cleanup_mask_fill(current_bgr, original_bgr, group, cleanup_mask, str
         visible_paper = enclosure.astype(bool) & ~(
             cv2.dilate((fill_mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
         )
-        if np.count_nonzero(visible_paper) >= 64:
+        if np.count_nonzero(visible_paper) >= 36:
             paper_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)[visible_paper]
-            if float(np.percentile(paper_gray, 90) - np.percentile(paper_gray, 10)) <= 18.0:
+            if float(np.percentile(paper_gray, 90) - np.percentile(paper_gray, 15)) <= 24.0:
+                bright_paper = visible_paper & (
+                    cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY) >= float(np.percentile(paper_gray, 50))
+                )
+                sample_paper = bright_paper if np.count_nonzero(bright_paper) >= 16 else visible_paper
                 enclosure_white_color = np.median(
-                    original_bgr[visible_paper], axis=0
+                    original_bgr[sample_paper], axis=0
                 ).astype(np.uint8)
-                fill_mask = fill_mask.copy()
+                base_u8 = (np.asarray(cleanup_mask) > 0).astype(np.uint8)
+                fill_mask = cv2.dilate((fill_mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8))
+                protect = getattr(group, "structure_protect_mask", None)
+                if isinstance(protect, np.ndarray) and protect.shape == fill_mask.shape:
+                    fill_mask[(protect > 0) & (base_u8 == 0)] = 0
                 fill_mask[~enclosure.astype(bool)] = 0
+                _record_fill_extension(group, fill_mask, base_u8)
     if enclosure_white_color is not None:
         result[fill_mask > 0] = enclosure_white_color
         if isinstance(getattr(group, "background_metrics", None), dict):
@@ -19624,8 +19810,9 @@ def _balloon_shape_layout(draw, text, font, area, center, spacing, stroke_width)
         ys, xs = np.nonzero(area)
         cx, cy = int(np.median(xs)), int(np.median(ys))
     # Line box from the tallest marks Portuguese uses (accents above capitals,
-    # cedilla and descenders below), so no line pokes out of its band.
-    probe = draw.textbbox((0, 0), "ÉÂÃÇÁGgjpq|", font=font, stroke_width=stroke_width)
+    # cedilla and descenders below when present), so no line pokes out of its band.
+    probe_Sample = "ÉÂÃÇÁGgjpq|" if any(c in str(text or "") for c in "gjpqyç") else "ÉÂÃÁ|"
+    probe = draw.textbbox((0, 0), probe_Sample, font=font, stroke_width=stroke_width)
     line_h = probe[3] - probe[1]
     pitch = line_h + spacing
     rows = np.flatnonzero(area[:, cx])
@@ -19646,51 +19833,64 @@ def _balloon_shape_layout(draw, text, font, area, center, spacing, stroke_width)
         return draw.textlength(" ".join(words_), font=font) + 2 * stroke_width
 
     for count in range(1, max_lines + 1):
-        top = cy - (count * pitch - spacing) / 2.0
-        bands = []
-        for index in range(count):
-            y1 = int(round(top + index * pitch))
-            y2 = y1 + line_h
-            if y1 < 0 or y2 >= height:
-                bands = None
-                break
-            left, right = 0, width - 1
-            for row in range(y1, y2 + 1):
-                a, b = span(row)
-                left, right = max(left, a), min(right, b)
-            if right - left < 4:
-                bands = None
-                break
-            bands.append((y1, left, right))
-        if not bands:
-            continue
-        placed, cursor = [], 0
-        for y1, left, right in bands:
-            line_words = []
-            while cursor < len(words) and measure(line_words + [words[cursor]]) <= right - left + 1:
-                line_words.append(words[cursor])
-                cursor += 1
-            placed.append((line_words, y1, left, right))
-        if cursor < len(words) or any(not item[0] for item in placed):
-            continue
-        layout = []
-        inside = True
-        for line_words, y1, left, right in placed:
-            line = " ".join(line_words)
-            box = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
-            line_w = box[2] - box[0]
-            line_cx = (left + right) / 2.0
-            lx, ly = line_cx - line_w / 2.0 - box[0], y1 - probe[1]
-            # The real ink box of the line must lie inside the area.
-            ink = draw.textbbox((lx, ly), line, font=font, stroke_width=stroke_width)
-            x1, y1i = max(0, int(np.floor(ink[0]))), max(0, int(np.floor(ink[1])))
-            x2, y2i = min(width - 1, int(np.ceil(ink[2]))), min(height - 1, int(np.ceil(ink[3])))
-            if not (area[y1i, x1] and area[y1i, x2] and area[y2i, x1] and area[y2i, x2]):
-                inside = False
-                break
-            layout.append((line, lx, ly))
-        if inside:
-            return layout
+        block_h = count * pitch - spacing
+        top_candidates = [cy - block_h / 2.0]
+        mid_top = (float(rows.min()) + float(rows.max()) - block_h) / 2.0
+        if abs(mid_top - top_candidates[0]) >= 2.0:
+            top_candidates.append(mid_top)
+        for top in top_candidates:
+            bands = []
+            for index in range(count):
+                y1 = int(round(top + index * pitch))
+                y2 = y1 + line_h
+                if y1 < 0 or y2 >= height:
+                    bands = None
+                    break
+                left, right = 0, width - 1
+                for row in range(y1, y2 + 1):
+                    a, b = span(row)
+                    left, right = max(left, a), min(right, b)
+                if right - left < 4:
+                    bands = None
+                    break
+                bands.append((y1, left, right))
+            if not bands:
+                continue
+            words_Work = list(words)
+            placed, cursor = [], 0
+            for y1, left, right in bands:
+                line_words = []
+                band_w = right - left + 1
+                while cursor < len(words_Work) and measure(line_words + [words_Work[cursor]]) <= band_w:
+                    line_words.append(words_Work[cursor])
+                    cursor += 1
+                if not line_words and cursor < len(words_Work) and len(words_Work[cursor]) >= 6:
+                    chunks = _split_long_word(draw, words_Work[cursor], font, max(12, band_w - 2 * stroke_width))
+                    if len(chunks) > 1 and measure([chunks[0]]) <= band_w:
+                        line_words.append(chunks[0])
+                        words_Work[cursor : cursor + 1] = chunks
+                        cursor += 1
+                placed.append((line_words, y1, left, right))
+            if cursor < len(words_Work) or any(not item[0] for item in placed):
+                continue
+            layout = []
+            inside = True
+            for line_words, y1, left, right in placed:
+                line = " ".join(line_words)
+                box = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+                line_w = box[2] - box[0]
+                line_cx = (left + right) / 2.0
+                lx, ly = line_cx - line_w / 2.0 - box[0], y1 - probe[1]
+                # The real ink box of the line must lie inside the area.
+                ink = draw.textbbox((lx, ly), line, font=font, stroke_width=stroke_width)
+                x1, y1i = max(0, int(np.floor(ink[0]))), max(0, int(np.floor(ink[1])))
+                x2, y2i = min(width - 1, int(np.ceil(ink[2]))), min(height - 1, int(np.ceil(ink[3])))
+                if not (area[y1i, x1] and area[y1i, x2] and area[y2i, x1] and area[y2i, x2]):
+                    inside = False
+                    break
+                layout.append((line, lx, ly))
+            if inside:
+                return layout
     return None
 
 
@@ -19795,7 +19995,8 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     if strategy == "caption_overlay":
         return _draw_rotated_caption_translation(img_bgr, group, font_path, text)
 
-    draw_box = _safe_draw_box(group.box, img_bgr.shape, group)
+    style_box = _safe_draw_box(group.box, img_bgr.shape, group)
+    draw_box = style_box
     vertical_source = _group_is_vertical_cjk(group)
     if vertical_source:
         # Vertical CJK columns are tall and narrow; the translation is set horizontally,
@@ -19808,21 +20009,29 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         cl0, cl1 = _clamp_horizontal_span_to_neighbors(
             nx, nx + width_target, bx, by, bw, bh, getattr(group, "neighbor_text_boxes", None)
         )
-        draw_box = (cl0, by, max(16, cl1 - cl0), bh)
+        enclosure = getattr(group, "light_enclosure_interior", None)
+        if isinstance(enclosure, np.ndarray) and enclosure.shape == img_bgr.shape[:2] and np.any(enclosure):
+            band = enclosure[max(0, by):min(enclosure.shape[0], by + bh), :]
+            xs_enc = np.where(band.any(axis=0))[0]
+            if xs_enc.size and int(xs_enc.max() - xs_enc.min()) >= max(16, int(0.75 * bw)):
+                cl0 = max(cl0, int(xs_enc.min()) + 3)
+                cl1 = min(cl1, int(xs_enc.max()) - 2)
+        if cl1 - cl0 >= max(16, bw):
+            draw_box = (cl0, by, max(16, cl1 - cl0), bh)
     group.safe_area = tuple(draw_box)
-    style = (
-        _caption_overlay_text_style(img_bgr, draw_box)
-        if strategy == "caption_overlay"
-        else _text_style_for_region(img_bgr, draw_box)
-    )
     typography_source = source_bgr if source_bgr is not None else img_bgr
+    style = (
+        _caption_overlay_text_style(img_bgr, style_box)
+        if strategy == "caption_overlay"
+        else _text_style_for_region(typography_source, style_box)
+    )
     typo_cache = getattr(group, "_cached_typo_profile", None)
-    typo_key = (tuple(draw_box), str(style.name), id(typography_source))
+    typo_key = (tuple(style_box), str(style.name), id(typography_source))
     if isinstance(typo_cache, dict) and typo_key in typo_cache:
         typography_profile = dict(typo_cache[typo_key])
     else:
         typography_profile = typography_profile_for_region(
-            typography_source, group, draw_box, style=style)
+            typography_source, group, style_box, style=style)
         if not isinstance(typo_cache, dict):
             typo_cache = {}
             try:
@@ -19986,7 +20195,8 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     # translated text has an unambiguous line to land each source ratio on.
     line_scales = _source_line_scale_ratios(group, typography_source)
     start_font_size = font_size
-    while font_size >= min_font:
+    fit_floor = max(8, min_font - 3)
+    while font_size >= fit_floor:
         font = get_font(preview_font_path or font_path, font_size, role=font_role,
                         prefer_role=prefer_preview_role, text=text)
         spacing = max(1, int(font_size * 0.1 * float(
@@ -20057,7 +20267,7 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
                 max(line_bottoms) - min(line_bottoms) if line_bottoms else 0
             )
             if descender_overshoot > 0:
-                spacing = spacing + descender_overshoot + max(2, style.stroke_width)
+                spacing = max(spacing, descender_overshoot + 1)
                 text_bbox = draw.multiline_textbbox(
                     (0, 0),
                     text_block,
@@ -20078,7 +20288,7 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
             break
         font_size -= 1
 
-    font_size = max(min_font, font_size)
+    font_size = max(fit_floor, font_size)
     # Inside a closed balloon the text follows the balloon's shape instead of the
     # source text's rectangle (the source width made "VENHA NOS / VISITAR / COMO"
     # columns in a wide balloon), at one uniform size up to the same cap. The area
@@ -20090,18 +20300,32 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         balloon_area = _balloon_text_area(group, img_bgr.shape, source_bgr)
     if balloon_area is not None:
         gx, gy, gw, gh = (int(v) for v in group.box)
-        reach_x, reach_y = int(round(0.25 * gw)), int(round(0.25 * gh))
+        reach_x = max(int(round(0.45 * gw)), 40)
+        reach_y = max(int(round(0.65 * gh)), 40)
         if _group_is_vertical_cjk(group):
             # A column's balloon is as wide as the column is tall, not 25 % wider than it.
             reach_x = max(reach_x, int(round(0.5 * gh)))
         own_x0 = max(0, gx - reach_x)
         own_x1 = min(balloon_area.shape[1], gx + gw + reach_x)
-        if _group_is_vertical_cjk(group):
+        own_y0 = max(0, gy - reach_y)
+        own_y1 = min(balloon_area.shape[0], gy + gh + reach_y)
+        neighbor_boxes = getattr(group, "neighbor_text_boxes", None)
+        if neighbor_boxes:
             own_x0, own_x1 = _clamp_horizontal_span_to_neighbors(
-                own_x0, own_x1, gx, gy, gw, gh, getattr(group, "neighbor_text_boxes", None)
+                own_x0, own_x1, gx, gy, gw, gh, neighbor_boxes
             )
+            for nb in neighbor_boxes:
+                nx, ny, nw, nh = (int(v) for v in nb)
+                ov_x = min(gx + gw, nx + nw) - max(gx, nx)
+                if ov_x < 0.2 * max(1, min(gw, nw)):
+                    continue
+                if ny + nh <= gy + 6:
+                    own_y0 = max(own_y0, (ny + nh + gy) // 2 + 4)
+                elif ny >= gy + gh - 6:
+                    own_y1 = min(own_y1, (gy + gh + ny) // 2 - 4)
         own_region = np.zeros(balloon_area.shape, dtype=bool)
-        own_region[max(0, gy - reach_y):gy + gh + reach_y, own_x0:own_x1] = True
+        if own_y1 > own_y0 and own_x1 > own_x0:
+            own_region[own_y0:own_y1, own_x0:own_x1] = True
         balloon_area = balloon_area & own_region
         if not np.any(balloon_area):
             balloon_area = None
@@ -20109,7 +20333,7 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         center = (x + w / 2.0, y + h / 2.0)
         # Never below the size the rectangle reached (when it fit): the shape is
         # chosen for its lines, not paid for with smaller text.
-        lowest = font_size if overflow_ratio <= 0.0 else min_font
+        lowest = fit_floor if (overflow_ratio > 0.0 or vertical_source) else font_size
         for candidate_size in range(start_font_size, lowest - 1, -1):
             candidate_font = get_font(preview_font_path or font_path, candidate_size, role=font_role,
                                       prefer_role=prefer_preview_role, text=text)
@@ -21897,6 +22121,32 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
         | ((sat - bg_sat) >= 34)
         | ((val >= 190) & (bg_gray <= 115))
     )
+    if bg_gray >= 180.0:
+        glyph_mask &= ~((gray >= bg_gray - 18.0) & (sat < 85.0))
+    # Scope to the OCR line boxes and balloon interior when present so panel corners
+    # outside an oval balloon (coloured hair, sky, dark panel gutters) cannot masquerade
+    # as coloured or outlined lettering.
+    lines_for_mask = [ln for ln in (getattr(group, "lines", None) or ()) if getattr(ln, "box", None)]
+    if lines_for_mask:
+        line_scope = np.zeros(glyph_mask.shape, dtype=bool)
+        for ln in lines_for_mask:
+            lx, ly, lw, lh = (int(v) for v in ln.box)
+            rx0 = max(0, lx - x - 6)
+            ry0 = max(0, ly - y - 6)
+            rx1 = min(w, lx + lw - x + 6)
+            ry1 = min(h, ly + lh - y + 6)
+            if rx1 > rx0 and ry1 > ry0:
+                line_scope[ry0:ry1, rx0:rx1] = True
+        scoped = glyph_mask & line_scope
+        if float(np.mean(scoped)) >= 0.006:
+            glyph_mask = scoped
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if isinstance(enclosure, np.ndarray) and enclosure.shape == img_bgr.shape[:2]:
+        enc_roi = enclosure[y : y + h, x : x + w]
+        if enc_roi.shape == glyph_mask.shape and float(np.mean(enc_roi)) >= 0.40:
+            enc_scoped = glyph_mask & enc_roi
+            if float(np.mean(enc_scoped)) >= 0.006:
+                glyph_mask = enc_scoped
     glyph_ratio = float(np.mean(glyph_mask))
     if glyph_ratio < 0.006:
         return {"confidence": 0.0, "source": "insufficient_pixels"}
@@ -21919,9 +22169,12 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
     # into the loose contrast mask) can push a *minority* blue/red sliver over
     # that low floor while black/white ink is still the true majority - that
     # false minority must not outrank the real majority ink color.
+    neutral_present = white_ratio >= 0.15 or (dark_ratio >= 0.18 and bg_gray > 90)
+    red_qualifies = red_ratio >= 0.10 and (not neutral_present or red_ratio > max(white_ratio, dark_ratio))
+    blue_qualifies = blue_ratio >= 0.10 and (not neutral_present or blue_ratio > max(white_ratio, dark_ratio))
     family_candidates = {
-        "red": (red_ratio if red_ratio >= 0.10 else 0.0, red_mask),
-        "blue": (blue_ratio if blue_ratio >= 0.10 else 0.0, blue_mask),
+        "red": (red_ratio if red_qualifies else 0.0, red_mask),
+        "blue": (blue_ratio if blue_qualifies else 0.0, blue_mask),
         # Ink cannot be black on a black backdrop: there the dark pixels of the footprint are the
         # fall-off of a glow, not the lettering (neon-purple white text read as "black").
         "black": (dark_ratio if dark_ratio >= 0.30 and bg_gray > 90 else 0.0, dark_mask),
@@ -21994,7 +22247,13 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
                 # boundary cluster even when its colour is uniform. The fill
                 # needs the same: black ink with a grey antialiased fringe is not
                 # grey text outlined in black.
-                if std_outline <= 55 and band_depth >= 2.0 and fill_depth >= 2.0:
+                c0_lum = 0.114 * float(centers[0][0]) + 0.587 * float(centers[0][1]) + 0.299 * float(centers[0][2])
+                c1_lum = 0.114 * float(centers[1][0]) + 0.587 * float(centers[1][1]) + 0.299 * float(centers[1][2])
+                if bg_gray >= 180.0 and min(c0_lum, c1_lum) <= 105.0 and max(c0_lum, c1_lum) >= 175.0:
+                    dark_k = 0 if c0_lum < c1_lum else 1
+                    dominant_bgr = centers[dark_k]
+                    color_family = "black"
+                elif std_outline <= 55 and band_depth >= 2.0 and fill_depth >= 2.0:
                     stroke_present = True
                     stroke_color = tuple(int(v) for v in centers[outline_k].tolist())
                     # White (or black) ink with a coloured glow splits into "core" and "glow"
@@ -22017,21 +22276,26 @@ def extract_original_lettering_profile(img_bgr, group, box, *, fill_ink=False):
                             dominant_bgr = centers[fill_k]
                     else:
                         dominant_bgr = centers[fill_k]
+                        if fill_family in {"white", "black"}:
+                            color_family = fill_family
                     stroke_confidence = round(min(1.0, 0.4 + min(cluster_dist, 200) / 400
                                                   + abs(frac0 - 0.5) * 0.6), 4)
     if fill_ink and color_family == "white" and bg_gray > 90:
         # Thin dark ink inside a wide white outline can be too few pixels for its own k-means
         # cluster (the two clusters both come out white). Dark pixels that are surrounded by the
         # white footprint are the letter's fill, not shading of the art.
-        dark_core = (glyph_mask & (val <= 70)).astype(np.uint8)
+        dark_core = (glyph_mask & (val <= 95)).astype(np.uint8)
         dark_count = int(dark_core.sum())
-        if dark_count >= 60 and dark_count >= 0.06 * int(glyph_mask.sum()):
-            ring = (cv2.dilate(dark_core, np.ones((5, 5), np.uint8)) > 0) & ~(dark_core > 0)
-            # The surround must be the outline (clearly lighter than the background), and it must
-            # enclose the dark pixels almost entirely: a dark outline around white ink touches the
-            # page as much as the fill.
-            ring_white = ring & (val >= 185) & (sat <= 75) & (gray >= bg_gray + 20)
-            if int(ring.sum()) and float(ring_white.sum()) / float(ring.sum()) >= 0.75:
+        if dark_count >= 50 and dark_count >= 0.04 * int(glyph_mask.sum()):
+            inner_dil = cv2.dilate(dark_core, np.ones((3, 3), np.uint8)) > 0
+            outer_dil = cv2.dilate(dark_core, np.ones((11, 11), np.uint8)) > 0
+            ring = outer_dil & ~inner_dil
+            # The surround must be the outline (clearly lighter than the background, or bright white
+            # when the background is already bright), and it must enclose the dark pixels almost
+            # entirely: a dark outline around white ink touches the page as much as the fill.
+            white_floor = min(235.0, bg_gray + 10.0)
+            ring_white = ring & (val >= 185) & (sat <= 75) & (gray >= white_floor)
+            if int(ring.sum()) and float(ring_white.sum()) / float(ring.sum()) >= 0.65:
                 stroke_color = tuple(int(v) for v in np.median(roi[ring_white], axis=0))
                 dominant_bgr = np.median(roi[dark_core > 0], axis=0)
                 color_family = "black"
@@ -22663,6 +22927,7 @@ def typography_profile_for_region(img_bgr, group, box, *, style=None):
             and float(lettering.get("glyph_occupancy") or 0.0) >= 0.08
             and _stylized
             and not lettering.get("measured_neutral_glow")
+            and not lettering.get("stroke_present")
         )
         if neutral_dark_ink:
             profile.update(
@@ -22724,12 +22989,17 @@ def typography_profile_for_region(img_bgr, group, box, *, style=None):
         and not neutral_dark_ink
         and (profile["source_text_color_confident"] or not _stylized)
     ):
-        profile["stroke_color"] = (int(stroke_bgr[2]), int(stroke_bgr[1]), int(stroke_bgr[0]))
-        profile["stroke_width"] = max(2, int(profile.get("stroke_width") or 1))
-        profile["source_stroke_confident"] = True
-        if _stylized and profile.get("glow_color") is not None:
-            # The preset glow belongs to the preset palette; follow the outline.
-            profile["glow_color"] = profile["stroke_color"]
+        cand_stroke_rgb = (int(stroke_bgr[2]), int(stroke_bgr[1]), int(stroke_bgr[0]))
+        cur_fill_rgb = profile.get("fill_color") or (0, 0, 0)
+        cur_fill_lum = 0.299 * cur_fill_rgb[0] + 0.587 * cur_fill_rgb[1] + 0.114 * cur_fill_rgb[2]
+        cand_stroke_lum = 0.299 * cand_stroke_rgb[0] + 0.587 * cand_stroke_rgb[1] + 0.114 * cand_stroke_rgb[2]
+        if abs(cand_stroke_lum - cur_fill_lum) >= 35.0:
+            profile["stroke_color"] = cand_stroke_rgb
+            profile["stroke_width"] = max(2, int(profile.get("stroke_width") or 1))
+            profile["source_stroke_confident"] = True
+            if _stylized and profile.get("glow_color") is not None:
+                # The preset glow belongs to the preset palette; follow the outline.
+                profile["glow_color"] = profile["stroke_color"]
 
     if lettering.get("measured_neutral_glow"):
         profile["glow_color"] = tuple(lettering["glow_color"])
@@ -22814,8 +23084,14 @@ def _typography_profile_for_region(img_bgr, group, box, *, style=None):
     aspect = float(w) / max(1.0, float(h))
     source_line_count = len(getattr(group, "lines", []) or [])
     compact_letters = re.sub(r"[^A-Z]", "", _ascii_fold(text).upper())
+    in_balloon_enclosure = bool(
+        str(getattr(group, "background_type", "") or "") in {"white_balloon", "dark_balloon"}
+        or getattr(group, "inside_balloon_like_region", False)
+        or getattr(group, "light_enclosure_interior", None) is not None
+    )
     display_geometry = (
-        h >= 120
+        not in_balloon_enclosure
+        and h >= 120
         and len(compact_letters) >= 10
         and (
             source_line_count >= 2
@@ -22823,7 +23099,7 @@ def _typography_profile_for_region(img_bgr, group, box, *, style=None):
             or aspect >= 1.6
         )
     )
-    open_caption = (
+    open_caption = not in_balloon_enclosure and (
         classification in {"narration", "caption", "system", "thought"}
         or aspect >= 3.2
         or display_geometry
@@ -22880,6 +23156,24 @@ def _typography_profile_for_region(img_bgr, group, box, *, style=None):
             base["glow_color"] = tuple(lettering["glow_color"])
             base["glow_strength"] = int(lettering.get("glow_strength") or 0)
         color_family = str(lettering.get("color_family") or "")
+        if color_family in {"red", "blue"} and _dark_ink_on_light_background(lettering):
+            # Dark blue/red ink in a light box (a plain narration caption or maroon dialogue) has no
+            # luminous lettering to reproduce: the measured colour is applied later, with the ordinary
+            # dialogue style.
+            base.update({
+                "visual_class": "balloon_dialogue",
+                "font_class": "comic_sans_style",
+                "fill_color": (32, 28, 38),
+                "stroke_color": (250, 250, 252),
+                "stroke_width": 1,
+                "glow_color": None,
+                "glow_strength": 0,
+                "shadow_color": None,
+                "shadow_offset": (0, 0),
+                "font_size_scale": 0.78,
+                "plain_lettering": True,
+            })
+            return base
         if color_family == "red" and open_caption:
             base.update({
                 "visual_class": "dramatic_red_display",
@@ -22896,23 +23190,6 @@ def _typography_profile_for_region(img_bgr, group, box, *, style=None):
                 "content_width_ratio": 0.88,
                 "line_height_scale": 0.9,
                 "selected_font_role": "shout",
-            })
-            return base
-        if color_family == "blue" and open_caption and _dark_ink_on_light_background(lettering):
-            # Dark blue ink in a light box (a plain narration caption) has no luminous lettering to
-            # reproduce: the measured colour is applied later, with the ordinary dialogue style.
-            base.update({
-                "visual_class": "balloon_dialogue",
-                "font_class": "comic_sans_style",
-                "fill_color": (32, 28, 38),
-                "stroke_color": (250, 250, 252),
-                "stroke_width": 1,
-                "glow_color": None,
-                "glow_strength": 0,
-                "shadow_color": None,
-                "shadow_offset": (0, 0),
-                "font_size_scale": 0.78,
-                "plain_lettering": True,
             })
             return base
         if color_family == "blue" and open_caption:
@@ -22935,7 +23212,7 @@ def _typography_profile_for_region(img_bgr, group, box, *, style=None):
             return base
         if (
             open_caption
-            and color_family in {"black", "white"}
+            and color_family in {"black", "white", "neutral"}
             and not lettering.get("measured_neutral_glow")
             and float(lettering.get("glyph_occupancy") or 0.0) >= 0.08
         ):
@@ -22943,7 +23220,9 @@ def _typography_profile_for_region(img_bgr, group, box, *, style=None):
             # black-on-white or white-on-black, no colored glow. Which side is
             # the fill vs the outline follows the majority ink color detected
             # above, not a fixed preset.
-            is_black_ink = color_family == "black"
+            dom_bgr = lettering.get("dominant_bgr") or (240, 240, 240)
+            dom_luma = 0.114 * dom_bgr[0] + 0.587 * dom_bgr[1] + 0.299 * dom_bgr[2]
+            is_black_ink = color_family == "black" or (color_family == "neutral" and dom_luma <= 125.0)
             base.update({
                 "visual_class": "ink_display",
                 "font_class": "tall_display",
