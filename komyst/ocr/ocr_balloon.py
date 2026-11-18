@@ -1048,8 +1048,11 @@ def propagate_chapter_declared_names(groups):
         text = clean_ocr_text(getattr(group, "text", "") or "")
         # A name an honorific addresses is a name in *this* group only: the same
         # word elsewhere ("GO") is usually the verb, so it is never propagated.
-        for raw in honorific_addressed_names(text):
-            key = _name_token_of(raw)
+        # Only abbreviated honorifics ("MS. GO", "MR. KIM") qualify as chapter_known
+        # hard authority; bare vocative guesses stay subject to the dictionary guard.
+        cleaned_group_text = clean_ocr_text(text)
+        for start, end in honorific_names.abbreviated_honorific_spans(cleaned_group_text):
+            key = _name_token_of(cleaned_group_text[start:end])
             if key and key not in {_name_token_of(n) for n in group.detected_proper_names}:
                 group.detected_proper_names.append(key)
         # Declared names ("X... but people call me Y") override the vocabulary
@@ -1663,6 +1666,40 @@ def _drop_stroke_artifacts(text):
     return re.sub(r"\s{2,}", " ", _STROKE_TOKEN.sub("", text)).strip()
 
 
+_COMIC_ALNUM_TOKEN = re.compile(r"\b(?=[A-Za-z0-9]*[0146])(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{3,}\b")
+_COMIC_ORDINAL_OR_CODE = re.compile(r"^(?:\d+(?:ST|ND|RD|TH|S|D|K|P|X|AM|PM)|[A-Z]\d+)$", re.IGNORECASE)
+_COMIC_DIGIT_MAP = str.maketrans({"0": "O", "1": "I", "4": "Y", "6": "G"})
+
+
+def _repair_comic_digit_glyph_confusions(text: str) -> str:
+    """Repair hand-lettered comic glyphs misread as digits ("6OING" -> "GOING", "BO4" -> "BOY").
+
+    Ordinals/codes ("1ST", "3D", "4K", "B2", "MP3") are untouched: a candidate is
+    accepted only when replacing 0/1/4/6 yields a frequent English word (Zipf >= 4.0)
+    or splits cleanly into frequent words via ``segment_words``.
+    """
+    def fix_token(match):
+        raw = match.group(0)
+        if _COMIC_ORDINAL_OR_CODE.match(raw):
+            return raw
+        alpha_count = sum(ch.isalpha() for ch in raw)
+        if alpha_count < 2:
+            return raw
+        candidate = raw.upper().translate(_COMIC_DIGIT_MAP)
+        if not candidate.isalpha():
+            return raw
+        if region_taxonomy.is_english_word(candidate) and region_taxonomy.word_zipf(candidate) >= 4.0:
+            return candidate if raw.isupper() or not any(ch.islower() for ch in raw) else candidate.lower()
+        pieces = region_taxonomy.segment_words(candidate) if len(candidate) >= 4 else None
+        if pieces and all(region_taxonomy.word_zipf(p) >= 4.0 for p in pieces):
+            joined = " ".join(pieces)
+            return joined if raw.isupper() or not any(ch.islower() for ch in raw) else joined.lower()
+        return raw
+
+    repaired = _COMIC_ALNUM_TOKEN.sub(fix_token, str(text or ""))
+    return re.sub(r"(?<=[A-Z]\s)00(?=\s+[A-Z]{2})", "DO", repaired)
+
+
 def split_glued_source_words(
     text,
     protected=(),
@@ -1691,6 +1728,7 @@ def split_glued_source_words(
         return str(text or "")
     text = _SHATTERED_WORD.sub(_join_shattered_word, str(text or ""))
     text = _drop_stroke_artifacts(text)
+    text = _repair_comic_digit_glyph_confusions(text)
     protected_keys = {_name_token_of(name) for name in protected or ()}
     names = sorted({key for key in (_name_token_of(name) for name in chapter_names or ())
                     if len(key) >= 3}, key=len, reverse=True)
@@ -6962,7 +7000,11 @@ def score_group_ocr_quality(group):
         reasons.append("many_improbable_characters")
         score -= 0.18
 
-    if re.search(r"\b\d{2,}[?!]*\b", text) and not re.search(r"\bage\s*\d+", text, re.I):
+    if (
+        re.search(r"\b\d{2,}[?!]*\b", text)
+        and not re.search(r"\bage\s*\d+|\b\d{1,2}:\d{2}\b", text, re.I)
+        and len(_ordinary_dialogue_words(text)) < 3
+    ):
         reasons.append("improbable_number_token")
         score -= 0.12
 
@@ -8339,6 +8381,19 @@ def enforce_rapidocr_quality_gate(groups, page_index=None):
             recovery.get("trusted") is False
             and str(recovery.get("reason") or "") == "material_variant_disagreement"
         ):
+            if (
+                group.classification in {"speech", "narration"}
+                and float(getattr(group, "confidence", 0.0) or 0.0) >= 0.72
+                and len(_ordinary_dialogue_words(split_glued_source_words(group.text, ocr_lang=_effective_ocr_lang(group)))) >= 4
+            ):
+                group.manual_review_required = True
+                group.quality_evidence = {
+                    **(group.quality_evidence or {}),
+                    "ocr_source_suspicious": True,
+                    "source_recovery_reason": str(recovery.get("reason") or ""),
+                }
+                recoverable += 1
+                continue
             group.ocr_quality_blocked = True
             group.ocr_quality_block_reason = "source_recovery_untrusted:material_variant_disagreement"
             group.manual_review_required = True
@@ -9609,11 +9664,31 @@ def _lettering_continuation_boxes(image_bgr, lines):
                 max(0, min(cx2, int(o.box[0] + o.box[2])) - max(cx1, int(o.box[0])))
                 * max(0, min(cy2, int(o.box[1] + o.box[3])) - max(cy1, int(o.box[1])))
                 > 0.2 * area
-                for o in strong
+                for o in lines
             ):
                 continue
             band = gray[cy1:cy2, cx1:cx2].astype(np.float32)
             ink = band <= median - offset if dark else band >= median + offset
+            if dark and int((anchor.metadata or {}).get("visual_white_region_id") or 0) > 0:
+                # Inside a white speech container, a continuation row sits on the same
+                # connected balloon paper; the curved black balloon outline and art
+                # outside the border do not.
+                uy1, uy2 = min(y, cy1), max(y + h, cy2)
+                ux1, ux2 = min(x, cx1), max(x + w, cx2)
+                paper = (gray[uy1:uy2, ux1:ux2] >= 180).astype(np.uint8)
+                p_cnt, p_lbl = cv2.connectedComponents(paper, connectivity=8)
+                seed = np.unique(p_lbl[y - uy1:y + h - uy1, x - ux1:x + w - ux1])
+                seed = seed[seed > 0]
+                if seed.size:
+                    connected_paper = np.isin(p_lbl, seed)[cy1 - uy1:cy2 - uy1, cx1 - ux1:cx2 - ux1]
+                    paper_halo = cv2.dilate(connected_paper.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+                    # Balloon border spans the crop width; glyphs stay enclosed inside paper_halo.
+                    ink &= paper_halo
+                    eroded_paper = cv2.erode(
+                        cv2.morphologyEx(connected_paper.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8)),
+                        np.ones((3, 3), np.uint8),
+                    ) > 0
+                    ink &= eroded_paper
             count, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
             keep = np.zeros(ink.shape, dtype=bool)
             for label in range(1, count):
@@ -11309,6 +11384,7 @@ def validate_translation_text(
             for token in [_name_token_of(span)]
             if token in source_tokens
             and token not in translated_tokens
+            and re.sub(r"'(?:S|LL|D|VE|RE|M)$", "", token) not in translated_tokens
             and (
                 # A word of the full English dictionary ("legate") that merely sits where a name
                 # could be (after a title) is not authority: all-caps lettering has no
@@ -15282,7 +15358,13 @@ def _light_enclosure_interior(original_bgr, group, background_metrics):
     if not owners:
         return None
     region = np.isin(labels, owners)
-    if region[0, :].any() or region[-1, :].any() or region[:, 0].any() or region[:, -1].any():
+    open_interior_edge = (
+        (wy1 > 0 and region[0, :].any())
+        or (wy2 < height and region[-1, :].any())
+        or (wx1 > 0 and region[:, 0].any())
+        or (wx2 < width and region[:, -1].any())
+    )
+    if open_interior_edge or np.count_nonzero(region) > 0.35 * (width * height):
         return None  # not closed inside the window: no enclosure to clip to
     filled = region.astype(np.uint8) * 255
     contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -16125,7 +16207,9 @@ def _mask_shape_metrics(mask, group_box):
     }
 
 
-def _lettering_contour_ghost_metrics(original_bgr, cleaned_bgr, cleanup_mask, protect_mask=None):
+def _lettering_contour_ghost_metrics(
+    original_bgr, cleaned_bgr, cleanup_mask, protect_mask=None, enclosure_mask=None
+):
     """Does the reconstruction redraw the letters' outline (a ghost)?
 
     The learned fill works on the mask grown by 2 px, so the seam gates, which
@@ -16142,9 +16226,14 @@ def _lettering_contour_ghost_metrics(original_bgr, cleaned_bgr, cleanup_mask, pr
     roi = _mask_roi(mask, 48)  # widest reach: 21 px band + 9 px means
     if roi is None:
         return out
+    full_shape = np.asarray(cleanup_mask).shape[:2]
     mask, original_bgr, cleaned_bgr = mask[roi], original_bgr[roi], cleaned_bgr[roi]
-    if isinstance(protect_mask, np.ndarray) and protect_mask.shape[:2] == np.asarray(cleanup_mask).shape[:2]:
+    if isinstance(protect_mask, np.ndarray) and protect_mask.shape[:2] == full_shape:
         protect_mask = protect_mask[roi]
+    if isinstance(enclosure_mask, np.ndarray) and enclosure_mask.shape[:2] == full_shape:
+        enclosure_mask = enclosure_mask[roi].astype(bool)
+    else:
+        enclosure_mask = None
     gray = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     source = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
@@ -16164,6 +16253,8 @@ def _lettering_contour_ghost_metrics(original_bgr, cleaned_bgr, cleanup_mask, pr
     keep = np.ones(mask.shape, dtype=bool)
     if isinstance(protect_mask, np.ndarray) and protect_mask.shape == mask.shape and np.any(protect_mask):
         keep = ~(cv2.dilate((protect_mask > 0).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0)
+    if enclosure_mask is not None and np.count_nonzero(band(0, 5) & keep & enclosure_mask) >= 30:
+        keep = keep & enclosure_mask
     inner = (mask > 0) & ~(cv2.erode(mask, np.ones((5, 5), np.uint8)) > 0) & keep
     step = local_step(gray, inner, band(0, 5) & keep)
     natural = local_step(source, band(9, 13) & keep, band(17, 21) & keep)
@@ -16196,7 +16287,12 @@ def _reconstruction_gate_failure(original_bgr, cleaned, group, cleanup_mask, bac
         if count:
             return "protected_effect_art_changed"
     ghost_metrics = _lettering_contour_ghost_metrics(
-        original_bgr, cleaned, cleanup_mask, getattr(group, "structure_protect_mask", None))
+        original_bgr,
+        cleaned,
+        cleanup_mask,
+        getattr(group, "structure_protect_mask", None),
+        getattr(group, "light_enclosure_interior", None),
+    )
     metrics.update(ghost_metrics)
     if ghost_metrics.get("lettering_contour_ghost"):
         return "lettering_contour_ghost"
@@ -16417,15 +16513,19 @@ def _textured_fill_shift_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
     """
     empty = {"textured_fill_shift": None, "textured_fill_shift_limit": None,
              "textured_fill_shift_rejected": False}
-    profile = str((getattr(group, "background_metrics", {}) or {}).get("local_background_class") or "")
+    bg_metrics = getattr(group, "background_metrics", {}) or {}
+    profile = str(bg_metrics.get("local_background_class") or "")
     # A ring surrounds the mask, so a linear gradient has the same median on both.
-    if profile.startswith("solid_"):
+    if profile.startswith("solid_") or bg_metrics.get("cleanup_fill_source") == "white_enclosure_paper_median":
         return empty
     if cleanup_mask is None or not np.any(cleanup_mask):
         return empty
     mask = (np.asarray(cleanup_mask) > 0).astype(np.uint8)
     ring = (cv2.dilate(mask, np.ones((9, 9), np.uint8)) > 0) & ~(
         cv2.dilate(mask, np.ones((3, 3), np.uint8)) > 0)
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if isinstance(enclosure, np.ndarray) and enclosure.shape == ring.shape and np.count_nonzero(ring & enclosure) >= 30:
+        ring = ring & enclosure
     if np.count_nonzero(ring) < 30:
         return empty
     cleaned = cv2.cvtColor(np.asarray(cleaned_bgr), cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -16475,7 +16575,7 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
     if (
         _proven_light_cleanup_region(background_metrics)
         and background_metrics.get("relaxed_white_context")
-    ):
+    ) or background_metrics.get("cleanup_fill_source") == "white_enclosure_paper_median":
         return {
             **empty,
             "flat_fill_ring_pixels": 0,
@@ -16494,10 +16594,12 @@ def _flat_patch_artifact_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
     flatness = _local_background_flatness(original_bgr, cleanup_mask)
     if flatness["flat_fill_supported"]:
         return {**empty, **flatness}
-    if _ring_proven_uniform_solid(background_metrics):
-        # The tiles around the text were measured as one tone. The ring used above also
-        # holds the neighbouring text line and the box border, which read as texture and
-        # made a flat fill look like a synthetic patch (the line then survived as a ghost).
+    if _ring_proven_uniform_solid(background_metrics) or (
+        background_metrics.get("cleanup_fill_source") == "white_enclosure_paper_median"
+    ):
+        # The tiles around the text (or the closed balloon paper) were measured as one tone.
+        # The ring used above also holds the neighbouring text line and the box border, which
+        # read as texture and made a flat fill look like a synthetic patch.
         return {**empty, **flatness, "flat_fill_supported": True, "flat_fill_proven_uniform": True}
     mask = np.asarray(cleanup_mask) > 0
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
@@ -16628,7 +16730,7 @@ def _reconstruction_seam_metrics(original_bgr, cleaned_bgr, group, cleanup_mask)
     if (
         _proven_light_cleanup_region(background_metrics)
         and background_metrics.get("relaxed_white_context")
-    ):
+    ) or background_metrics.get("cleanup_fill_source") == "white_enclosure_paper_median":
         return {
             **empty,
             "seam_reason": "light_page_restoration",
@@ -17850,20 +17952,29 @@ _TRIVIAL_FILL_MAX_LUMINANCE_STD = 6.0
 def _classic_fill_is_trivially_safe(group):
     """The classic fill needs no learned rival on a flat solid background.
 
-    All of: a solid light/dark local background, luminance std <= 6, not sound lettering, and the
-    spatial harmonic gate did not reject the classic fill. Anything uncertain returns False, so
-    the learned candidate is still compared exactly as before.
+    All of: a solid light/dark local background (or uniform white balloon/box), not sound lettering,
+    and the spatial harmonic gate did not reject the classic fill. Anything uncertain returns False,
+    so the learned candidate is still compared exactly as before.
     """
+    if (
+        str(getattr(group, "classification", "") or "").lower() == "sfx"
+        or getattr(group, "spatial_harmonic_gate_rejected", False)
+    ):
+        return False
     metrics = getattr(group, "background_metrics", None)
     if not isinstance(metrics, dict):
         return False
     std = metrics.get("local_background_luminance_std")
-    return (
+    if (
         metrics.get("local_background_class") in _TRIVIAL_FILL_CLASSES
         and isinstance(std, (int, float))
         and std <= _TRIVIAL_FILL_MAX_LUMINANCE_STD
-        and str(getattr(group, "classification", "") or "").lower() != "sfx"
-        and not getattr(group, "spatial_harmonic_gate_rejected", False)
+    ):
+        return True
+    return bool(
+        str(getattr(group, "background_type", "") or "") in {"white_balloon", "narration_box"}
+        and metrics.get("uniform_light")
+        and float(metrics.get("white_pixel_ratio") or 0.0) >= 0.72
     )
 
 
@@ -18561,12 +18672,32 @@ def _learned_inpaint(current_bgr, group, cleanup_mask):
     pad = 32
     y1, y2 = max(0, ys.min() - pad), min(mask_u8.shape[0], ys.max() + pad + 1)
     x1, x2 = max(0, xs.min() - pad), min(mask_u8.shape[1], xs.max() + pad + 1)
+    inside = mask_u8 > 0
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    enclosure_bool = (
+        enclosure.astype(bool)
+        if isinstance(enclosure, np.ndarray) and enclosure.shape == mask_u8.shape
+        else None
+    )
+    has_enclosure = bool(
+        enclosure_bool is not None
+        and np.count_nonzero(inside & ~enclosure_bool) <= 0.05 * max(1, np.count_nonzero(inside))
+        and np.count_nonzero(enclosure_bool & ~inside) >= 32
+    )
+    inpaint_bgr = current_bgr
+    if has_enclosure:
+        # Outside a closed balloon lies its black ink border and external panel art;
+        # paint ~enclosure with the balloon's own paper median so the model never
+        # bleeds dark surrounding panels into a white/light balloon interior.
+        inpaint_bgr = current_bgr.copy()
+        inpaint_bgr[~enclosure_bool] = np.median(
+            current_bgr[enclosure_bool & ~inside], axis=0
+        ).astype(current_bgr.dtype)
     key = hashlib.sha1(
         f"{mask_u8.shape}:{y1}:{y2}:{x1}:{x2}:".encode("ascii")
         + mask_u8[y1:y2, x1:x2].tobytes()
-        + current_bgr[y1:y2, x1:x2].tobytes()
+        + inpaint_bgr[y1:y2, x1:x2].tobytes()
     ).hexdigest()
-    inside = mask_u8 > 0
     cached = _LEARNED_FILL_CACHE.get(key)
     if cached is not None:
         # Only the reconstructed pixels are cached: the rest of the page may have
@@ -18578,7 +18709,7 @@ def _learned_inpaint(current_bgr, group, cleanup_mask):
     try:
         inpainter = advanced_art_inpainting.get_default_inpainter()
         with _LAMA_INFERENCE_LOCK:
-            cleaned, _telemetry = inpainter.reconstruct(current_bgr, mask_u8 * 255)
+            cleaned, _telemetry = inpainter.reconstruct(inpaint_bgr, mask_u8 * 255)
     except Exception as exc:  # noqa: BLE001 - unavailable model: classic fill, recorded
         group.learned_texture_fill = {"status": "unavailable", "reason": type(exc).__name__}
         return None
@@ -18592,6 +18723,10 @@ def _learned_inpaint(current_bgr, group, cleanup_mask):
     roi = _mask_roi(mask_u8, 24)  # widest reach: 3 px band + 15 px means
     roi_mask, roi_inside = mask_u8[roi], inside[roi]
     outer = (cv2.dilate(roi_mask, np.ones((7, 7), np.uint8)) > 0) & ~roi_inside
+    if has_enclosure:
+        encl_outer = outer & enclosure_bool[roi]
+        if np.count_nonzero(encl_outer) >= 16:
+            outer = encl_outer
     inner = roi_inside & ~(cv2.erode(roi_mask, np.ones((7, 7), np.uint8)) > 0)
     tone_offset = [0.0, 0.0, 0.0]
     outer_f, inner_f = outer.astype(np.float32), inner.astype(np.float32)
@@ -18601,7 +18736,7 @@ def _learned_inpaint(current_bgr, group, cleanup_mask):
         inner_support = np.maximum(cv2.blur(inner_f, (15, 15)), 1e-3)
         differences = []
         for channel in range(3):
-            outside_mean = cv2.blur(current_bgr[roi][..., channel].astype(np.float32) * outer_f, (15, 15)) / np.maximum(outer_support, 1e-3)
+            outside_mean = cv2.blur(inpaint_bgr[roi][..., channel].astype(np.float32) * outer_f, (15, 15)) / np.maximum(outer_support, 1e-3)
             inside_mean = cv2.blur(cleaned[roi][..., channel].astype(np.float32) * inner_f, (15, 15)) / inner_support
             differences.append(float(np.median((outside_mean - inside_mean)[paired])))
         offset = np.asarray(differences, dtype=np.float32)
@@ -18911,7 +19046,40 @@ def _apply_cleanup_mask_fill(current_bgr, original_bgr, group, cleanup_mask, str
         # visible patch, so reconstruct from the surrounding artwork instead.
         white_region = False
         dark_region = False
-    if white_region:
+    enclosure_white_color = None
+    enclosure = getattr(group, "light_enclosure_interior", None)
+    if (
+        config.WHITE_BALLOON_FLAT_FILL
+        and not spatial_gate_denies_constant
+        and isinstance(enclosure, np.ndarray)
+        and enclosure.shape == fill_mask.shape[:2]
+        and _inside_white_enclosure(original_bgr, group, fill_mask)
+        and not (
+            config.CLEAN_SCREENTONE_DETECTION
+            and _screentone_around(
+                original_bgr,
+                fill_mask,
+                enclosure,
+                [tuple(int(v) for v in line.box) for line in _cleanup_lines_for_group(group)],
+            )
+        )
+    ):
+        visible_paper = enclosure.astype(bool) & ~(
+            cv2.dilate((fill_mask > 0).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        )
+        if np.count_nonzero(visible_paper) >= 64:
+            paper_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)[visible_paper]
+            if float(np.percentile(paper_gray, 90) - np.percentile(paper_gray, 10)) <= 18.0:
+                enclosure_white_color = np.median(
+                    original_bgr[visible_paper], axis=0
+                ).astype(np.uint8)
+                fill_mask = fill_mask.copy()
+                fill_mask[~enclosure.astype(bool)] = 0
+    if enclosure_white_color is not None:
+        result[fill_mask > 0] = enclosure_white_color
+        if isinstance(getattr(group, "background_metrics", None), dict):
+            group.background_metrics["cleanup_fill_source"] = "white_enclosure_paper_median"
+    elif white_region:
         fill_color = _estimated_white_region_fill_color(
             original_bgr,
             cleanup_mask,

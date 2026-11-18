@@ -290,4 +290,54 @@ def test_english_quantity_ordinals_1s_ocr_speck_and_container_gap_interior_gate(
     assert gaps == []
 
 
+def test_white_enclosure_on_dark_panel_comic_digit_typos_and_clitic_names():
+    import komyst.translation.semantic_fidelity as sf
+    from komyst.translation import honorific_names
 
+    # 1. White balloon on dark panel touching right page margin stays pure white after cleanup
+    dark_page = np.full((260, 260, 3), 28, dtype=np.uint8)
+    cv2.ellipse(dark_page, (195, 130), (75, 58), 0, 0, 360, (253, 253, 253), -1)
+    cv2.ellipse(dark_page, (195, 130), (75, 58), 0, 0, 360, (12, 12, 12), 3)
+    cv2.putText(dark_page, "STAY BACK!", (140, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (15, 15, 15), 2)
+    ln = _mk_line("STAY BACK!", (138, 118, 108, 26))
+    grp = ob.TextGroup(group_id="WB1", lines=[ln], text="STAY BACK!", classification="speech")
+    cleaned, mask, metrics = ob._remove_text_for_group(dark_page, dark_page, grp, strategy="primary")
+    assert metrics.get("mask_valid") is True, metrics
+    assert float(cleaned[mask > 0].mean()) >= 245.0
+
+    # 2. Continuation boxes inside a closed white container ignore the balloon outline
+    ln.metadata = {"visual_white_region_id": 1}
+    assert ob._lettering_continuation_boxes(dark_page, [ln]) == []
+
+    # 3. Comic digit-for-letter confusions & temporal "early" -> "antes do prazo"
+    assert ob.split_glued_source_words("THIS ISN'T 6OING WELL. THE BO4 IS HERE.") == (
+        "THIS ISN'T GOING WELL. THE BOY IS HERE."
+    )
+    assert sf.evaluate_local_fidelity(
+        "I HANDED IT IN EARLY FOR EXTRA CREDIT.",
+        "ENTREGUEI ANTES DO PRAZO PARA GANHAR CRÉDITO EXTRA.",
+    ).status == sf.FAITHFUL
+    assert sf.evaluate_local_fidelity(
+        "MY LEG IS 6ONNA FALL OFF!",
+        "MINHA PERNA VAI CAIR!",
+    ).status == sf.FAITHFUL
+
+    # 4. Abbreviated honorific possessive clitic + vocative common English noun
+    assert honorific_names.abbreviated_honorific_spans("IN MS. PARK'S CLASS.") == [(7, 11)]
+    g_voc = ob.TextGroup(group_id="V1", lines=[], text="COME ON, SLACKER.", classification="speech")
+    g_hon = ob.TextGroup(group_id="H1", lines=[], text="IN MS. PARK'S CLASS.", classification="speech")
+    ob.propagate_chapter_declared_names([g_voc, g_hon])
+    assert ob.validate_translation_text(
+        g_voc.text,
+        "VAMOS LÁ, PREGUIÇOSO.",
+        "speech",
+        ob._group_validation_allowed_proper_names(g_voc),
+        required_name_spans=ob.group_proper_name_spans(g_voc),
+    )[0] is True
+    assert ob.validate_translation_text(
+        g_hon.text,
+        "NA AULA DA SRA. PARK.",
+        "speech",
+        ob._group_validation_allowed_proper_names(g_hon),
+        required_name_spans=ob.group_proper_name_spans(g_hon),
+    )[0] is True

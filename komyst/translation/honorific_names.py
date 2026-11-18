@@ -15,7 +15,30 @@ _NOT_A_NAME = frozenset({"AND", "OR", "THE", "A", "AN", "OF"})
 _PATTERN = re.compile(
     r"\b(?:" + "|".join(HONORIFIC_ABBREVIATIONS) + r")(\.?\s+)([A-Za-z][A-Za-z'’-]*)",
     re.IGNORECASE)
+_ENGLISH_CLITIC_SUFFIX = re.compile(r"['’](?:s|ll|d|ve|re|m)$", re.IGNORECASE)
 PROTECT_TAG = "x"
+
+
+def _strip_english_clitic_span(text: str, span: tuple[int, int]) -> tuple[int, int]:
+    start, end = span
+    raw = text[start:end]
+    clitic = _ENGLISH_CLITIC_SUFFIX.search(raw)
+    if clitic and end - len(clitic.group(0)) - start >= 2:
+        end -= len(clitic.group(0))
+    while end > start and text[end - 1] in "'’":
+        end -= 1
+    return start, end
+
+
+def abbreviated_honorific_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) of each name addressed by an abbreviated honorific ("MS. GO")."""
+    text = str(text or "")
+    spans = []
+    for match in _PATTERN.finditer(text):
+        start, end = _strip_english_clitic_span(text, match.span(2))
+        if end > start and text[start:end].upper() not in _NOT_A_NAME:
+            spans.append((start, end))
+    return sorted(set(spans))
 
 
 # A word in vocative position ("WAKE UP, SUNLESS!", "SUNLESS, WAKE UP!") that is
@@ -32,12 +55,13 @@ def _vocative_name_spans(text):
     spans = []
     for pattern in (_VOCATIVE_AFTER, _VOCATIVE_BEFORE):
         for match in pattern.finditer(text):
-            word = match.group(1).strip("'’")
+            start, end = _strip_english_clitic_span(text, match.span(1))
+            word = text[start:end]
             key = word.upper()
             # Only a dictionary word is at risk of being translated ("SUNLESS"); an
             # unknown token ("ARSKAN", OCR damage like "IPROMISE") is left unclaimed.
             if key not in _NOT_A_NAME and is_english_word(key) and word_zipf(word) < VOCATIVE_NAME_MAX_ZIPF:
-                spans.append(match.span(1))
+                spans.append((start, end))
     return spans
 
 
@@ -45,10 +69,7 @@ def honorific_name_spans(text):
     """(start, end) of each name ``text`` addresses: after an honorific abbreviation
     ("MS. GO"), or in vocative position when rare as an English word ("SUNLESS")."""
     text = str(text or "")
-    return sorted(set(
-        [match.span(2) for match in _PATTERN.finditer(text)
-         if match.group(2).strip("'’").upper() not in _NOT_A_NAME]
-        + _vocative_name_spans(text)))
+    return sorted(set(abbreviated_honorific_spans(text) + _vocative_name_spans(text)))
 
 
 def _name_spans(text, names):

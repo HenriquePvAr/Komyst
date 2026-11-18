@@ -250,13 +250,17 @@ def _ocr_quantity_reading(text):
     """``text`` with the OCR confusions that fake or hide a quantity undone.
 
     "5O" -> "50" (letter O for zero), "1CANFEEL" -> " CANFEEL" (a 1 glued to a
-    word is a capital I), "STOREDTHIRTY-SIX" / "SIXIN" -> a spelled number split
-    off the word it was glued to.
+    word is a capital I), "6OING"/"BO4"/"O-MI-G00" -> comic hand-lettering G/Y/O
+    misread as 6/4/0 inside words, "STOREDTHIRTY-SIX" / "SIXIN" -> a spelled
+    number split off the word it was glued to.
     """
     text = re.sub(r"(?<=\d)[Oo]+(?![A-Za-z])", lambda m: "0" * len(m.group(0)), str(text or ""))
     text = re.sub(r"(?<![\d$#])\b1[Ss]\b", "is", text)
-    text = re.sub(rf"(?<!\d)(?<!\d[.,])[10](?![\d.,])(?=[A-Za-z]{{2}})(?!{_ORDINAL_SUFFIX})", " ", text, flags=re.I)
-    text = re.sub(r"(?<=[A-Za-z]{2})[10](?![\dA-Za-z])", " ", text)
+    text = re.sub(r"(?<=[A-Z]\s)00(?=\s+[A-Z])", "DO", text)
+    text = re.sub(rf"(?<!\d)(?<!\d[.,])[1046](?![\d.,])(?=[A-Za-z]{{2}})(?!{_ORDINAL_SUFFIX})", " ", text, flags=re.I)
+    text = re.sub(r"(?<=[A-Za-z])[1046]+(?=[A-Za-z])", " ", text)
+    text = re.sub(r"(?<=[A-Za-z]{2})[1046]+(?![\dA-Za-z])", " ", text)
+    text = re.sub(r"(?<=[A-Za-z])0{2,}(?![\dA-Za-z])", " ", text)
     numbers = sorted((word for word in _SOURCE_CARDINALS if len(word) >= 3), key=len, reverse=True)
     glued = re.compile(r"^(%s)(?=[a-z]{2})|(?<=[a-z]{2})(%s)$" % ("|".join(numbers), "|".join(numbers)), re.I)
 
@@ -603,8 +607,8 @@ def _state_replaced_action(source, candidate):
 # Only the *subordinating* target form counts. A bare "depois" is the ordinary
 # adverb "later" ("I will explain later." -> "Eu explicarei depois.") and states
 # no order at all; "depois que" does.
-_SOURCE_ORDER_BEFORE = frozenset({"before", "until", "till"})
-_SOURCE_ORDER_AFTER = frozenset({"after", "once"})
+_SOURCE_ORDER_BEFORE = frozenset({"before", "until", "till", "early", "earlier", "prior", "ahead", "sooner"})
+_SOURCE_ORDER_AFTER = frozenset({"after", "once", "later", "subsequently", "afterward", "afterwards"})
 _TARGET_ORDER_BEFORE = re.compile(r"\bantes\s+(?:que|de|d[oa]s?)\b|\bate\s+que\b")
 _TARGET_ORDER_AFTER = re.compile(r"\bdepois\s+(?:que|de|d[oa]s?)\b|\bapos\s+que\b")
 
