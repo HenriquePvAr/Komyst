@@ -524,7 +524,20 @@ def weak_label_semantic_promotion_allowed(
     if label not in _WEAK_LABELS:
         return True
     if not source_is_english(source_lang):
-        return len(str(text or "").strip()) >= 4
+        stripped = str(text or "").strip()
+        if re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]", stripped):
+            return len(stripped) >= 4
+        # Non-English Latin languages (Spanish, French): require prose/clause shape so
+        # lone 4-letter sound effects ("CLAT", "CRAC!") stay preservable while real
+        # sentences/clauses promote cleanly without relying on the English word list.
+        uni_words = re.findall(r"[^\W\d_]+", stripped, flags=re.UNICODE)
+        if len(uni_words) >= 3:
+            return True
+        if len(uni_words) >= 2 and re.search(r"[.!?…¿¡,]", stripped):
+            return True
+        if len(uni_words) == 1 and len(uni_words[0]) >= 5 and re.search(r"(?:\.\.|…|,\s*$)", stripped):
+            return True
+        return False
     body = str(text or "")
     # Glued OCR ("THEMORE WERUNIT, THEEASIER") hides the words a sentence is
     # made of; split a non-word into dictionary words before counting.

@@ -195,3 +195,37 @@ def test_rapidocr_profile_engine_restores_use_det_after_rec_only_call():
     assert rec_only == [["너무", 0.95]]
     full_det, _ = wrapper(np.zeros((100, 100, 3), np.uint8))
     assert full_det is not None and full_det[0][1] == "무림맹주가"
+
+
+def test_spanish_and_french_accents_and_elisions_do_not_trigger_english_ocr_corruption():
+    import komyst.review.region_taxonomy as rt
+
+    es_text = "POR ESO CREÍ QUE ERA AMOR Y ME ENAMORÉ DE ÉL AL INSTANTE."
+    es_line = _mk_line(es_text, (20, 20, 300, 80), confidence=0.97)
+    es_line.ocr_lang = "es"
+    es_group = ob.TextGroup(group_id="ES1", lines=[es_line], text=es_text)
+    es_group.ocr_lang = "es"
+    score, reasons = ob.score_group_ocr_quality(es_group)
+    assert score >= 0.95
+    assert reasons == []
+
+    fr_text = "L'HOMME QU'IL AVAIT ÉTÉ N'EXISTAIT PLUS."
+    fr_line = _mk_line(fr_text, (20, 20, 300, 80), confidence=0.96)
+    fr_line.ocr_lang = "fr"
+    fr_group = ob.TextGroup(group_id="FR1", lines=[fr_line], text=fr_text)
+    fr_group.ocr_lang = "fr"
+    fr_score, fr_reasons = ob.score_group_ocr_quality(fr_group)
+    assert fr_score >= 0.95
+    assert fr_reasons == []
+
+    assert rt.weak_label_semantic_promotion_allowed(
+        "decorative", "A PESAR DE MI ANHELO, HERDIN NO ESTUVO PRESENTE.", source_lang="es"
+    ) is True
+    assert rt.weak_label_semantic_promotion_allowed("unknown", "CLAT", source_lang="es") is False
+
+    valid, reason = ob.validate_translation_text(
+        "ESTOY DISPUESTA A REPETIR ESTA NOCHE LAS VECES QUE HAGAN FALTA.",
+        "ESTOU DISPOSTA A REPETIR ISSO ESTA NOITE QUANTAS VEZES FOR NECESSÁRIO.",
+    )
+    assert valid is True, reason
+

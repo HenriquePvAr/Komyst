@@ -699,13 +699,34 @@ def process_image_array(
     )
 
 
-def analyze_image_array(original_bgr, raw_lines, page_index=None):
+def _effective_ocr_lang(obj, default: str = "en") -> str:
+    direct = str(getattr(obj, "ocr_lang", None) or "").strip()
+    if direct:
+        return direct
+    meta = getattr(obj, "metadata", None)
+    if isinstance(meta, dict) and str(meta.get("ocr_lang") or "").strip():
+        return str(meta["ocr_lang"]).strip()
+    for line in (getattr(obj, "lines", None) or ()):
+        line_lang = str(getattr(line, "ocr_lang", None) or "").strip()
+        if line_lang:
+            return line_lang
+        lmeta = getattr(line, "metadata", None)
+        if isinstance(lmeta, dict) and str(lmeta.get("ocr_lang") or "").strip():
+            return str(lmeta["ocr_lang"]).strip()
+    return default
+
+
+def analyze_image_array(original_bgr, raw_lines, page_index=None, ocr_lang=None):
     with ocr_line_provenance.page(page_index):
-        return _analyze_image_array(original_bgr, raw_lines, page_index=page_index)
+        return _analyze_image_array(original_bgr, raw_lines, page_index=page_index, ocr_lang=ocr_lang)
 
 
-def _analyze_image_array(original_bgr, raw_lines, page_index=None):
+def _analyze_image_array(original_bgr, raw_lines, page_index=None, ocr_lang=None):
     original = original_bgr
+    if ocr_lang:
+        for _ln in (raw_lines or ()):
+            if not getattr(_ln, "ocr_lang", None):
+                _ln.ocr_lang = str(ocr_lang)
     # Snapshot the incoming lines *before* ``_candidate_from_line`` rewrites
     # ``OCRLine.text`` on these very objects.
     ocr_line_provenance.record_input_lines(raw_lines, origin="analyze_input")
@@ -4393,14 +4414,20 @@ def _keep_short_words_stacked_on_text(candidates):
 
 
 def _candidate_from_line(line, image_shape):
-    repaired, reason = repair_ocr_text(line.text)
-    assessment = assess_ocr_repair(
-        line.text,
-        repaired,
-        reason,
-        confidence=line.confidence,
-        source_engine=line.engine,
-    )
+    from komyst.ocr import ocr_models
+
+    if ocr_models.source_is_english(_effective_ocr_lang(line)):
+        repaired, reason = repair_ocr_text(line.text)
+        assessment = assess_ocr_repair(
+            line.text,
+            repaired,
+            reason,
+            confidence=line.confidence,
+            source_engine=line.engine,
+        )
+    else:
+        repaired, reason = line.text, ""
+        assessment = {"accepted": False}
     if repaired != line.text:
         line.metadata = {
             **(line.metadata or {}),
@@ -4753,8 +4780,15 @@ def _group_lines(lines, page_index=None, image_bgr=None):
 
 
 def _repair_group_texts(groups):
+    from komyst.ocr import ocr_models
+
     for group in groups:
+        group_lang = _effective_ocr_lang(group, "")
+        if group_lang and not getattr(group, "ocr_lang", None):
+            group.ocr_lang = group_lang
         group.original_text = group.text
+        if not ocr_models.source_is_english(group_lang or "en"):
+            continue
         repaired, reason = repair_ocr_text(group.text)
         assessment = assess_ocr_repair(
             group.text,
@@ -5540,7 +5574,8 @@ def _classify_groups(groups, image_bgr, page_index=None):
                 is_known_sfx
                 # Position near the page edge says nothing about written prose.
                 or (strongly_styled
-                    and not region_taxonomy.weak_label_semantic_promotion_allowed("unknown", group.text))):
+                    and not region_taxonomy.weak_label_semantic_promotion_allowed(
+                        "unknown", group.text, source_lang=_effective_ocr_lang(group)))):
             group.classification = "sfx"
         elif diagonal and len(words) <= 3:
             group.classification = "decorative"
@@ -5729,7 +5764,8 @@ def _refine_classification_with_background(group):
         and compact not in ORDINARY_DIALOGUE_WORDS
         and compact not in COMMON_ENGLISH_WORDS
         # Prose with sentence shape is speech, not a sound.
-        and not region_taxonomy.weak_label_semantic_promotion_allowed("unknown", group.text)
+        and not region_taxonomy.weak_label_semantic_promotion_allowed(
+            "unknown", group.text, source_lang=_effective_ocr_lang(group))
         and not bool(getattr(group, "preserve_as_name", False))
         and not bool(getattr(group, "detected_proper_names", []) or [])
         and len(group.lines) == 1
@@ -5883,7 +5919,8 @@ def _refine_classification_with_background(group):
         and saturation >= 25.0
         # A sentence lettered over a saturated backdrop ("THE SPELL'S VOICE...?" on
         # golden threads) is narration, not a sign - same evidence as compact_graphic.
-        and not region_taxonomy.weak_label_semantic_promotion_allowed("unknown", group.text)
+        and not region_taxonomy.weak_label_semantic_promotion_allowed(
+            "unknown", group.text, source_lang=_effective_ocr_lang(group))
     )
     compact_graphic = (
         len(words) == 1
@@ -5894,7 +5931,8 @@ def _refine_classification_with_background(group):
         and compact not in ORDINARY_DIALOGUE_WORDS
         # ...and prose outside that list keeps its sentence evidence
         # (region_taxonomy.weak_label_semantic_promotion_allowed).
-        and not region_taxonomy.weak_label_semantic_promotion_allowed("unknown", group.text)
+        and not region_taxonomy.weak_label_semantic_promotion_allowed(
+            "unknown", group.text, source_lang=_effective_ocr_lang(group))
         and (
             white_ratio < 0.25
             or group.background_type == "speed_lines"
@@ -6222,7 +6260,8 @@ def _decorative_short_display_story_promotion_allowed(group):
         return False
     quoted = bool(re.search(r"[\"“”'‘’].+[\"“”'‘’]", body.strip()))
     # A punctuated clause ("THAT'S RIGHT.") is a story line on a colored burst too.
-    clause = region_taxonomy.weak_label_semantic_promotion_allowed("decorative", body)
+    clause = region_taxonomy.weak_label_semantic_promotion_allowed(
+        "decorative", body, source_lang=_effective_ocr_lang(group))
     caption_like = (quoted or clause or len(semantic_words) >= 3
                     or (confidence >= 0.95 and len(set(semantic_words)) == len(semantic_words)))
     if not caption_like:
@@ -6344,6 +6383,7 @@ def _apply_classification_policy(group):
     weak_promotion_allowed = region_taxonomy.weak_label_semantic_promotion_allowed(
         group.classification,
         group.text,
+        source_lang=_effective_ocr_lang(group),
     )
     if _legible_sentence_promotion_allowed(group):
         weak_promotion_allowed = True
@@ -6560,6 +6600,7 @@ def _group_has_story_translation_authority(group):
     return region_taxonomy.weak_label_semantic_promotion_allowed(
         getattr(group, "classification", ""),
         getattr(group, "text", ""),
+        source_lang=_effective_ocr_lang(group),
     )
 
 
@@ -6572,7 +6613,11 @@ def _score_group_quality(groups):
         # heuristics and the region was dropped before the repair that sends it
         # split to the provider: judge the text the provider will actually get.
         raw_text = group.text
-        repaired = split_glued_source_words(raw_text, protected=group.detected_proper_names)
+        repaired = split_glued_source_words(
+            raw_text,
+            protected=group.detected_proper_names,
+            ocr_lang=_effective_ocr_lang(group),
+        )
         if repaired != raw_text:
             group.text = repaired
         group.ocr_glue_repaired = repaired != raw_text
@@ -6644,6 +6689,8 @@ _NON_LATIN_SCRIPT = re.compile("[\\u3040-\\u30ff\\u3400-\\u9fff\\uac00-\\ud7af\\
 
 
 def score_group_ocr_quality(group):
+    from komyst.ocr import ocr_models
+
     text = clean_ocr_text(group.text)
     reasons = []
     score = 1.0
@@ -6656,6 +6703,58 @@ def score_group_ocr_quality(group):
     if (letters and _NON_LATIN_SCRIPT.search(text)
             and sum(not ("A" <= char.upper() <= "Z") for char in letters) * 2 >= len(letters)):
         return (0.8 if group.cleanup_lines else 0.9), ["non_latin_script"]
+
+    # Non-English Latin languages (Spanish, French): accents, ¿/¡, French elisions
+    # ("L'", "D'", "C'", "QU'") and Romance short words ("DE", "EL", "LA", "LE", "YA")
+    # are valid prose, never English OCR corruption. Keep only language-neutral
+    # structural OCR-damage checks here.
+    if not ocr_models.source_is_english(_effective_ocr_lang(group)):
+        worded = [
+            line for line in group.cleanup_lines or ()
+            if re.search(r"[^\W_]", str(getattr(line, "text", "") or ""), flags=re.UNICODE)
+        ]
+        if worded:
+            reasons.append("ignored_line_inside_text_region")
+            score -= min(0.45, 0.22 + len(worded) * 0.1)
+        weird_letters = [
+            ch for ch in letters
+            if not ("A" <= ch.upper() <= "Z" or "\u00c0" <= ch <= "\u024f" or ch in "œŒŸÿ")
+        ]
+        if weird_letters:
+            reasons.append("non_ascii_ocr_artifact")
+            score -= min(0.42, 0.18 + len(weird_letters) * 0.06)
+        folded_nl = _ascii_fold(text).upper()
+        compact_nl = re.sub(r"[^A-Z0-9]", "", folded_nl)
+        tokens_nl = re.findall(r"[A-Za-z0-9']+", folded_nl)
+        if re.search(r"[A-Z]+[0-9]+[A-Z]*|[0-9]+[A-Z]+", folded_nl):
+            reasons.append("alphanumeric_ocr_artifact")
+            score -= 0.16
+        if len(compact_nl) >= 18 and not re.search(r"\s", text):
+            reasons.append("long_token_without_spaces")
+            score -= 0.24
+        if re.findall(r"[BCDFGHJKLMNPQRSTVWXYZ]{6,}", folded_nl):
+            reasons.append("long_consonant_run")
+            score -= 0.2
+        odd_nl = sum(
+            1 for ch in text
+            if not (ch.isalnum() or ch.isspace() or ch in "'’‘\"“”!?¿¡.,:;+-&/()«»~…·—–")
+        )
+        if odd_nl / max(1, len(text)) > 0.16:
+            reasons.append("many_improbable_characters")
+            score -= 0.18
+        if group.confidence < config.RAPIDOCR_MIN_CONFIDENCE:
+            reasons.append("low_confidence")
+            score -= 0.28
+        elif group.confidence < 0.7:
+            reasons.append("medium_low_confidence")
+            score -= 0.12
+        if _group_seems_cross_region(group):
+            reasons.append("possible_cross_region_group")
+            score -= 0.28
+        if group.ignored and len(tokens_nl) >= 4 and len(compact_nl) >= 18:
+            reasons.append("ignored_high_content_text")
+            score -= 0.34
+        return max(0.0, min(1.0, score)), reasons
 
     # A dropped line of bare punctuation ("!!!" under the words) loses no words.
     worded = [line for line in group.cleanup_lines or ()
@@ -10852,6 +10951,17 @@ def _is_portuguese_folded_token(token_infos, index):
         )
     ):
         return True
+    if index > 0 and index + 1 < len(token_infos):
+        prev_info = token_infos[index - 1]
+        next_info = token_infos[index + 1]
+        pt_vocab = portuguese_words._portuguese_words()
+        if (
+            (prev_info["has_diacritic"] or previous_token in pt_vocab)
+            and previous_token not in RESIDUAL_TRANSLATION_ENGLISH_WORDS
+            and (next_info["has_diacritic"] or next_token in pt_vocab)
+            and next_token not in RESIDUAL_TRANSLATION_ENGLISH_WORDS
+        ):
+            return True
     return False
 
 

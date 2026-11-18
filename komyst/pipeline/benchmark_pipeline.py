@@ -2584,6 +2584,7 @@ def process_pre_translation_page(
             original,
             state.get("raw_lines", []),
             page_index=state["index"],
+            ocr_lang=ocr_lang,
         )
     reocr_started = time.perf_counter()
     with profile_step(
@@ -2620,6 +2621,7 @@ def process_pre_translation_page(
                     original,
                     reocr_lines,
                     page_index=state["index"],
+                    ocr_lang=ocr_lang,
                 )
     recovery_started = time.perf_counter()
     with profile_step(
@@ -2658,6 +2660,7 @@ def process_pre_translation_page(
                     original,
                     recovery_lines,
                     page_index=state["index"],
+                    ocr_lang=ocr_lang,
                 )
                 apply_variant_votes(groups)
     with _rapidocr_section():
@@ -2704,6 +2707,7 @@ def process_pre_translation_page(
                     original,
                     fallback_lines,
                     page_index=state["index"],
+                    ocr_lang=ocr_lang,
                 )
             state["ocr_metadata"] = {
                 **state.get("ocr_metadata", {}),
@@ -2818,6 +2822,7 @@ def process_pre_translation_page(
                     original,
                     fallback_lines,
                     page_index=state["index"],
+                    ocr_lang=ocr_lang,
                 )
             if config.ENABLE_OCR_CACHE:
                 save_ocr_cache(
@@ -6107,6 +6112,7 @@ def _story_translation_required(item):
     return region_taxonomy.weak_label_semantic_promotion_allowed(
         classification,
         _item_source_text(item),
+        source_lang=str(item.get("ocr_lang") or getattr(config, "OCR_LANG", "en") or "en"),
     )
 
 

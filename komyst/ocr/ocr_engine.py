@@ -810,9 +810,13 @@ class OCREngine:
 
     def _annotate_lines(self, lines, page, engine):
         metadata = dict(self.last_run_metadata)
+        if getattr(self, "lang_choice", None):
+            metadata.setdefault("ocr_lang", str(self.lang_choice))
         for line in lines:
             line.engine = engine
             line.page = page
+            if getattr(self, "lang_choice", None):
+                line.ocr_lang = str(self.lang_choice)
             existing = dict(line.metadata or {})
             existing.update(metadata)
             line.metadata = existing
