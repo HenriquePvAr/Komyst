@@ -258,7 +258,7 @@ def test_english_quantity_ordinals_1s_ocr_speck_and_container_gap_interior_gate(
         classification="speech",
         source_lang="en",
     )
-    assert f1.outcome == sf.FAITHFUL, f1
+    assert f1.status == sf.FAITHFUL, f1
 
     f2 = sf.evaluate_local_fidelity(
         "THIS 1S GREAT! YOU'RE SERIOUSLY INTERESTING!",
@@ -266,7 +266,7 @@ def test_english_quantity_ordinals_1s_ocr_speck_and_container_gap_interior_gate(
         classification="speech",
         source_lang="en",
     )
-    assert f2.outcome == sf.FAITHFUL, f2
+    assert f2.status == sf.FAITHFUL, f2
 
     speck_txt = "ALL RIGHT, FOR THE SÉCOND BAPTISM, LET'S TRY TO KILL EACH OTHER."
     speck_line = _mk_line(speck_txt, (10, 10, 260, 60), confidence=0.95)
