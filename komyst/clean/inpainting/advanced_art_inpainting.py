@@ -200,8 +200,25 @@ class AdvancedArtInpainter:
         crop_bgr = image_bgr[y : y + h, x : x + w]
         crop_mask = mask_u8[y : y + h, x : x + w]
         rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        padded_rgb, original_h, original_w = _pad_to_modulo(rgb, 8)
-        padded_mask, _, _ = _pad_to_modulo(crop_mask, 8)
+        max_infer_side = max(256, int(getattr(config, "LAMA_MAX_INFER_SIDE", 896) or 896))
+        infer_rgb = rgb
+        infer_mask = crop_mask
+        downscaled = False
+        if max(h, w) > max_infer_side:
+            scale = max_infer_side / float(max(h, w))
+            infer_w = max(8, int(round(w * scale)))
+            infer_h = max(8, int(round(h * scale)))
+            infer_rgb = cv2.resize(rgb, (infer_w, infer_h), interpolation=cv2.INTER_AREA)
+            dilated_mask = cv2.dilate(crop_mask, np.ones((3, 3), np.uint8), iterations=1)
+            infer_mask = cv2.resize(dilated_mask, (infer_w, infer_h), interpolation=cv2.INTER_NEAREST)
+            downscaled = True
+        use_dml_buckets = model is self._gpu_session
+        if use_dml_buckets:
+            padded_rgb, infer_orig_h, infer_orig_w = _pad_to_dml_bucket(infer_rgb)
+            padded_mask, _, _ = _pad_to_dml_bucket(infer_mask)
+        else:
+            padded_rgb, infer_orig_h, infer_orig_w = _pad_to_modulo(infer_rgb, 8)
+            padded_mask, _, _ = _pad_to_modulo(infer_mask, 8)
         image_np = _norm_img(padded_rgb)[None]
         mask_np = (_norm_img(padded_mask)[None] > 0).astype(np.float32)
         started = time.perf_counter()
@@ -217,7 +234,9 @@ class AdvancedArtInpainter:
         self.metrics["inference_count"] += 1
         self.metrics["inference_seconds"] += inference_seconds
         pred_rgb = np.clip(pred_rgb * 255, 0, 255).astype(np.uint8)
-        pred_rgb = pred_rgb[:original_h, :original_w]
+        pred_rgb = pred_rgb[:infer_orig_h, :infer_orig_w]
+        if downscaled and (pred_rgb.shape[0] != h or pred_rgb.shape[1] != w):
+            pred_rgb = cv2.resize(pred_rgb, (w, h), interpolation=cv2.INTER_CUBIC)
         pred_bgr = cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR)
         pred_bgr = _match_luminance_and_feather_crop(crop_bgr, pred_bgr, crop_mask)
         composited = image_bgr.copy()
@@ -252,6 +271,9 @@ class AdvancedArtInpainter:
             "mask_semantics": "255/remove_reconstruct",
             "context_crop_xywh": [int(x), int(y), int(w), int(h)],
             "context_margin": int(margin),
+            "infer_hw": [int(infer_orig_h), int(infer_orig_w)],
+            "padded_hw": [int(padded_rgb.shape[0]), int(padded_rgb.shape[1])],
+            "downscaled": bool(downscaled),
         }
         return composited, telemetry
 
@@ -283,6 +305,27 @@ def _norm_img(np_img: np.ndarray) -> np.ndarray:
     if len(np_img.shape) == 2:
         np_img = np_img[:, :, None]
     return np_img.transpose((2, 0, 1)).astype("float32") / 255.0
+
+
+_LAMA_DML_BUCKETS = (256, 384, 512, 640, 768, 896)
+
+
+def _next_dml_bucket(dim: int) -> int:
+    for bucket in _LAMA_DML_BUCKETS:
+        if dim <= bucket:
+            return bucket
+    return ((dim + 63) // 64) * 64
+
+
+def _pad_to_dml_bucket(img: np.ndarray) -> tuple[np.ndarray, int, int]:
+    h, w = img.shape[:2]
+    target_h = _next_dml_bucket(h)
+    target_w = _next_dml_bucket(w)
+    ph = target_h - h
+    pw = target_w - w
+    if ph or pw:
+        img = cv2.copyMakeBorder(img, 0, ph, 0, pw, cv2.BORDER_REFLECT)
+    return img, h, w
 
 
 def _pad_to_modulo(img: np.ndarray, mod: int) -> tuple[np.ndarray, int, int]:

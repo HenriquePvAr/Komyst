@@ -158,6 +158,7 @@ class DirectMLSession:
 
         options = ort.SessionOptions()
         options.enable_mem_pattern = False
+        options.enable_cpu_mem_arena = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         options.log_severity_level = 3
         from komyst.core.gpu import DIRECTML_LOCK

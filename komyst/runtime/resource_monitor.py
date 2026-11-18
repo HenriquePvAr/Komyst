@@ -25,6 +25,96 @@ except Exception:  # pragma: no cover
 
 
 MB = 1024 * 1024
+_PDH_FMT_LARGE = 0x00000400
+
+
+class _WindowsGpuVramSampler:
+    """Zero-dependency Windows PDH sampler for GPU Adapter Dedicated Usage."""
+
+    def __init__(self) -> None:
+        self._pdh: Any = None
+        self._query: Any = None
+        self._counters: list[Any] = []
+        self._large_type: Any = None
+        self._available = False
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _CounterLarge(ctypes.Structure):
+                _fields_ = [("CStatus", wintypes.DWORD), ("largeValue", ctypes.c_longlong)]
+
+            pdh = ctypes.windll.pdh
+            pcch = wintypes.DWORD(0)
+            pattern = r"\GPU Adapter Memory(*)\Dedicated Usage"
+            pdh.PdhExpandWildCardPathW(None, pattern, None, ctypes.byref(pcch), 0)
+            if pcch.value <= 0:
+                return
+            buf = ctypes.create_unicode_buffer(pcch.value)
+            if pdh.PdhExpandWildCardPathW(None, pattern, buf, ctypes.byref(pcch), 0) != 0:
+                return
+            paths = [p for p in ctypes.wstring_at(buf, pcch.value).split("\x00") if p]
+            if not paths:
+                return
+            query = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, 0, ctypes.byref(query)) != 0:
+                return
+            counters = []
+            for path in paths:
+                handle = ctypes.c_void_p()
+                if pdh.PdhAddEnglishCounterW(query, path, 0, ctypes.byref(handle)) == 0:
+                    counters.append(handle)
+            if not counters:
+                pdh.PdhCloseQuery(query)
+                return
+            self._pdh = pdh
+            self._query = query
+            self._counters = counters
+            self._large_type = _CounterLarge
+            self._available = True
+        except Exception:
+            self.close()
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def sample_mb(self) -> float | None:
+        if not self._available or self._pdh is None or self._query is None:
+            return None
+        try:
+            import ctypes
+
+            if self._pdh.PdhCollectQueryData(self._query) != 0:
+                return None
+            total_bytes = 0
+            for handle in self._counters:
+                val = self._large_type()
+                if self._pdh.PdhGetFormattedCounterValue(handle, _PDH_FMT_LARGE, None, ctypes.byref(val)) == 0:
+                    total_bytes += max(0, int(val.largeValue))
+            return round(total_bytes / MB, 3)
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        if self._pdh is not None and self._query is not None:
+            try:
+                self._pdh.PdhCloseQuery(self._query)
+            except Exception:
+                pass
+        self._query = None
+        self._counters = []
+        self._available = False
+
+
+def sample_gpu_vram_mb() -> float | None:
+    sampler = _WindowsGpuVramSampler()
+    try:
+        return sampler.sample_mb()
+    finally:
+        sampler.close()
 
 
 class ResourceMonitor:
@@ -59,6 +149,7 @@ class ResourceMonitor:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._parent = psutil.Process(os.getpid()) if self.enabled else None
+        self._gpu_vram: _WindowsGpuVramSampler | None = None
 
     @property
     def unavailable_reason(self) -> str:
@@ -69,6 +160,7 @@ class ResourceMonitor:
             return
         self.output_folder.mkdir(parents=True, exist_ok=True)
         self._started = time.monotonic()
+        self._gpu_vram = _WindowsGpuVramSampler()
         self._prime_cpu_counters()
         self._thread = threading.Thread(
             target=self._run,
@@ -93,6 +185,9 @@ class ResourceMonitor:
         if self._thread:
             self._thread.join(timeout=max(2.0, self.interval_seconds * 2))
         self._sample_once()
+        if self._gpu_vram is not None:
+            self._gpu_vram.close()
+            self._gpu_vram = None
         return self.write_reports()
 
     def set_stage(self, stage: str) -> None:
@@ -230,6 +325,7 @@ class ResourceMonitor:
         virtual = psutil.virtual_memory()
         swap = psutil.swap_memory()
         per_core = psutil.cpu_percent(interval=None, percpu=True)
+        vram_mb = self._gpu_vram.sample_mb() if self._gpu_vram is not None else None
         return {
             "system_total_mb": round(virtual.total / MB, 3),
             "system_available_mb": round(virtual.available / MB, 3),
@@ -242,6 +338,7 @@ class ResourceMonitor:
             "per_core_cpu": [round(float(item), 3) for item in per_core],
             "physical_cores": psutil.cpu_count(logical=False) or 0,
             "logical_cores": psutil.cpu_count(logical=True) or 0,
+            "gpu_vram_used_mb": vram_mb,
         }
 
     def _process_metrics(self, process: Any) -> dict[str, Any]:
@@ -320,6 +417,14 @@ class ResourceMonitor:
             values = [float(sample.get(field) or 0.0) for sample in samples]
             summary[f"{field}_avg"] = round(statistics.fmean(values), 3)
             summary[f"{field}_peak"] = round(max(values), 3)
+        vram_values = [
+            float(sample["gpu_vram_used_mb"])
+            for sample in samples
+            if sample.get("gpu_vram_used_mb") is not None
+        ]
+        if vram_values:
+            summary["gpu_vram_used_mb_avg"] = round(statistics.fmean(vram_values), 3)
+            summary["gpu_vram_used_mb_peak"] = round(max(vram_values), 3)
         child_peaks: dict[int, float] = {}
         child_roles: dict[int, str] = dict(self.worker_roles)
         for sample in samples:
@@ -363,6 +468,7 @@ class ResourceMonitor:
             "system_ram_percent",
             "cpu_percent",
             "swap_used_mb",
+            "gpu_vram_used_mb",
             "child_count",
         ]
         with path.open("w", newline="", encoding="utf-8") as file:
@@ -451,11 +557,13 @@ def detect_gpu_basic() -> dict[str, Any]:
                     "driver_version": item.get("DriverVersion", ""),
                 }
             )
+        vram_now = sample_gpu_vram_mb()
         return {
             "available": bool(normalized),
             "devices": normalized,
-            "usage_monitoring": "not_available",
-            "pipeline_gpu_usage_detected": False,
+            "usage_monitoring": "windows_pdh_dedicated_vram" if vram_now is not None else "not_available",
+            "dedicated_vram_used_mb": vram_now,
+            "pipeline_gpu_usage_detected": vram_now is not None and vram_now > 0,
         }
     except Exception as exc:
         return {"available": False, "reason": str(exc)}

@@ -79,6 +79,25 @@ def reset_call_budget() -> None:
     _CALLS_LAUNCHED = 0
 
 
+def _release_directml_vram_before_flux() -> bool:
+    """Release resident DirectML LaMa buffers so Vulkan sd-cli fits on 8 GB GPUs."""
+    import gc
+
+    unloaded = False
+    try:
+        from komyst.clean.inpainting import advanced_art_inpainting
+
+        inpainter = advanced_art_inpainting.get_default_inpainter()
+        if getattr(inpainter, "_gpu_session", None) is not None or getattr(inpainter, "_model", None) is not None:
+            inpainter.unload()
+            unloaded = True
+    except Exception:
+        pass
+    if unloaded:
+        gc.collect()
+    return unloaded
+
+
 def flux_reference_edit(
     image_bgr: np.ndarray,
     *,
@@ -136,6 +155,7 @@ def flux_reference_edit(
         gpu_queued = time.perf_counter()
         with DIRECTML_LOCK:
             metrics["gpu_queue_seconds"] = round(time.perf_counter()-gpu_queued, 6)
+            metrics["directml_unloaded_before_flux"] = _release_directml_vram_before_flux()
             generated = _run_reference_edit(
                 source, directory, prompt, steps, timeout_seconds, metrics,
                 diagnostic_path=diagnostic_path,

@@ -3504,6 +3504,16 @@ def _render_analyzed_image(
                 text_pixels = max(1, int(mask_metrics.get("text_component_pixels", 0) or 0))
                 changed_base = _inpaint_change_metrics(before_group, cleaned, cleanup_mask)
                 changed_fill = _inpaint_change_metrics(before_group, cleaned, fill_mask)
+                halo_changed_pixels = 0
+                if fill_mask_pixels > 0:
+                    hy0, hy1, hx0, hx1 = _mask_bbox_bounds(fill_mask, pad=0)
+                    if hy1 > hy0 and hx1 > hx0:
+                        halo_mask_roi = fill_mask[hy0:hy1, hx0:hx1] & ~(np.asarray(cleanup_mask[hy0:hy1, hx0:hx1]) > 0)
+                        if np.any(halo_mask_roi):
+                            halo_changed_pixels = int(np.count_nonzero(
+                                np.any(np.asarray(cleaned[hy0:hy1, hx0:hx1]) != np.asarray(before_group[hy0:hy1, hx0:hx1]), axis=2)
+                                & halo_mask_roi
+                            ))
                 mask_metrics.update({
                     "mask_pixels_before_lettering_refine": broad_mask_pixels,
                     "mask_pixels": mask_pixels,
@@ -3529,10 +3539,7 @@ def _render_analyzed_image(
                     "changed_pixels_inside_fill_mask": changed_fill["changed_pixels_in_mask"],
                     "changed_pixels_outside_fill_mask": changed_fill["changed_pixels_outside_mask"],
                     "changed_fraction_in_fill_mask": changed_fill["changed_fraction_in_mask"],
-                    "changed_pixels_in_fill_halo": int(np.count_nonzero(
-                        np.any(np.asarray(cleaned) != np.asarray(before_group), axis=2)
-                        & fill_mask & ~(np.asarray(cleanup_mask) > 0)
-                    )),
+                    "changed_pixels_in_fill_halo": halo_changed_pixels,
                     "inpaint_method": str(
                         (getattr(group, "background_metrics", {}) or {}).get("cleanup_fill_source")
                         or strategy
@@ -12797,6 +12804,20 @@ def _lama_composite_leak_px(base_bgr, composite_bgr, mask) -> int:
     return int(np.count_nonzero(changed))
 
 
+def _mask_bbox_bounds(mask, pad: int = 0) -> tuple[int, int, int, int]:
+    arr = np.asarray(mask)
+    h, w = arr.shape[:2]
+    row_any = np.any(arr > 0, axis=1)
+    if not np.any(row_any):
+        return 0, 0, 0, 0
+    ys = np.flatnonzero(row_any)
+    y0, y1 = max(0, int(ys[0]) - pad), min(h, int(ys[-1]) + pad + 1)
+    col_any = np.any(arr[y0:y1] > 0, axis=0)
+    xs = np.flatnonzero(col_any)
+    x0, x1 = max(0, int(xs[0]) - pad), min(w, int(xs[-1]) + pad + 1)
+    return y0, y1, x0, x1
+
+
 def _inpaint_change_metrics(before_bgr, after_bgr, mask) -> dict:
     """Measure candidate changes inside and outside its authorized mask."""
     before = np.asarray(before_bgr)
@@ -12805,6 +12826,23 @@ def _inpaint_change_metrics(before_bgr, after_bgr, mask) -> dict:
     if before.shape != after.shape or before.shape[:2] != raw_mask.shape[:2]:
         return {"changed_pixels_in_mask": None, "changed_pixels_outside_mask": None,
                 "changed_fraction_in_mask": None, "change_measurement_error": "shape_mismatch"}
+    y0, y1, x0, x1 = _mask_bbox_bounds(raw_mask, pad=2)
+    if y1 > y0 and x1 > x0 and (
+        np.array_equal(before[:y0], after[:y0])
+        and np.array_equal(before[y1:], after[y1:])
+        and np.array_equal(before[y0:y1, :x0], after[y0:y1, :x0])
+        and np.array_equal(before[y0:y1, x1:], after[y0:y1, x1:])
+    ):
+        inside_roi = raw_mask[y0:y1, x0:x1] > 0
+        changed_roi = np.any(before[y0:y1, x0:x1] != after[y0:y1, x0:x1], axis=2)
+        inside_count = int(np.count_nonzero(inside_roi))
+        changed_inside = int(np.count_nonzero(changed_roi & inside_roi))
+        changed_outside = int(np.count_nonzero(changed_roi & ~inside_roi))
+        return {
+            "changed_pixels_in_mask": changed_inside,
+            "changed_pixels_outside_mask": changed_outside,
+            "changed_fraction_in_mask": round(changed_inside / max(1, inside_count), 4),
+        }
     inside = raw_mask > 0
     changed = np.any(before != after, axis=2)
     changed_inside = int(np.count_nonzero(changed & inside))
@@ -18065,7 +18103,11 @@ def _learned_inpaint(current_bgr, group, cleanup_mask):
     pad = 32
     y1, y2 = max(0, ys.min() - pad), min(mask_u8.shape[0], ys.max() + pad + 1)
     x1, x2 = max(0, xs.min() - pad), min(mask_u8.shape[1], xs.max() + pad + 1)
-    key = hashlib.sha1(mask_u8.tobytes() + current_bgr[y1:y2, x1:x2].tobytes()).hexdigest()
+    key = hashlib.sha1(
+        f"{mask_u8.shape}:{y1}:{y2}:{x1}:{x2}:".encode("ascii")
+        + mask_u8[y1:y2, x1:x2].tobytes()
+        + current_bgr[y1:y2, x1:x2].tobytes()
+    ).hexdigest()
     inside = mask_u8 > 0
     cached = _LEARNED_FILL_CACHE.get(key)
     if cached is not None:

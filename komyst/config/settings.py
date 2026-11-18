@@ -476,6 +476,9 @@ FLUX_OFFLOAD_TO_CPU = _env_bool("FLUX_OFFLOAD_TO_CPU", False)
 OCR_ENGLISH_PROFILE = os.getenv("OCR_ENGLISH_PROFILE", "ppocrv6_tiny").strip().lower()
 FLUX_MIN_FREE_RAM_MB = _env_int("FLUX_MIN_FREE_RAM_MB", 6000 if FLUX_OFFLOAD_TO_CPU else 1500)
 LAMA_MAX_CROP_PIXELS = _env_int("LAMA_MAX_CROP_PIXELS", 4_000_000)
+# Cap the longest side sent through LaMa's dense DFT MatMul graph; oversized context
+# crops are downscaled for inference and composited back strictly inside the full-res mask.
+LAMA_MAX_INFER_SIDE = max(256, _env_int("LAMA_MAX_INFER_SIDE", 896))
 # Lean the drawn translation like the source lettering (measured slant) when the
 # chosen font is upright.
 RENDER_MATCH_SOURCE_SLANT = _env_bool("RENDER_MATCH_SOURCE_SLANT", True)

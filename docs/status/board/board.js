@@ -28,6 +28,22 @@ window.BOARD = {
   },
   cards: [
     {
+      id: 'STAGE3-VRAM-LAMA-FLUX-20261117',
+      title: 'Etapa 3 — Escala/buckets fixos do LaMa DirectML, descarga de VRAM antes do FLUX, telemetria PDH de VRAM e métricas ROI de inpaint',
+      domain: 'pipeline',
+      column: 'dev',
+      env: 'branch',
+      updated: '2026-11-17',
+      summary: 'Limita a inferência DFT do LaMa a LAMA_MAX_INFER_SIDE=896 com buckets fixos DirectML (256..896) e recomposição exata na máscara original; descarrega a sessão DirectML do LaMa antes do subprocesso Vulkan do FLUX; adiciona amostragem de VRAM dedicada no Windows via PDH em resource_monitor; restringe _inpaint_change_metrics e o cache de _learned_inpaint ao ROI.',
+      risk: 'TESTED_OFFLINE + GPU LOCAL MEDIDA: 59 testes passando (test_stage3_vram_and_lama, test_lama_onnx_export, test_textured_speech_inpainting, FLUX e ResourceMonitor). MEDIDO na RX 6600 (recorte 1512x1412): 4559,6 ms -> 1131,9 ms (4,03x mais rápido, -75,2 %) e pico de VRAM dedicada de 7322,4 MB -> 5298,9 MB (~2,0 GB economizados; unload libera até 3,65 GB antes do FLUX).',
+      blockedBy: 'Falta apenas a Etapa 4: parâmetro context na DeepL (nomes/pronomes), retry de transporte idempotente em wallet-reserve, limpeza final das ambiguidades de documentação e validação em capítulos/UI.',
+      delivered: [
+        'LAMA_MAX_INFER_SIDE=896 + buckets DirectML 256..896 (4559,6 ms -> 1131,9 ms e -2,0 GB de pico de VRAM na RX 6600)',
+        'Descarga automática da sessão DirectML do LaMa antes do sd-cli (FLUX) sob DIRECTML_LOCK',
+        'Telemetria gpu_vram_used_mb / gpu_vram_used_mb_peak via Windows PDH (~0,06 ms/amostra) + _inpaint_change_metrics em ROI'
+      ]
+    },
+    {
       id: 'STAGE2-ROI-PERF-SFX-20261117',
       title: 'Etapa 2 — Render/validação por ROI em 12 MP, PDF em streaming, costura CJK vertical, pré-filtro re-OCR e política estrutural de SFX curtos',
       domain: 'pipeline',

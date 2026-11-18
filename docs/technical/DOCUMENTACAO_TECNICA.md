@@ -1087,6 +1087,20 @@ tradutor.
     tokens (letras alongadas, tokens sem vogais de baixa frequência Zipf, interjeições vocálicas e
     entradas do glossário SFX), respeitando `TRANSLATE_SFX=False` (`sfx_translation_disabled`) sem
     lista fixa de nomes ou séries.
+- **VRAM dedicada, escala/buckets fixos do LaMa DirectML e coexistência com FLUX (2026-11-17, IMPLEMENTADO):**
+  - `advanced_art_inpainting.py` limita o maior lado de inferência a `LAMA_MAX_INFER_SIDE` (`896`) e
+    alinha entradas DirectML a buckets fixos (`256, 384, 512, 640, 768, 896`), recompondo em
+    resolução plena apenas dentro de `mask > 0`. Medido na RX 6600 em recorte `1512×1412`: latência
+    caiu de **4559,6 ms** para **1131,9 ms** (**4,03× mais rápido**, -75,2 %) e o pico de VRAM
+    dedicada caiu de **7322,4 MB (+3636,9 MB)** para **5298,9 MB (+1676,0 MB)** (~2,0 GB economizados).
+  - `flux_edit.py` descarrega a sessão DirectML do LaMa (`unload()` + `gc.collect()`) sob
+    `DIRECTML_LOCK` imediatamente antes de lançar `sd-cli.exe` (Vulkan), liberando até ~3,65 GB de
+    VRAM dedicada para evitar falhas `device_memory` em GPUs de 8 GB.
+  - `resource_monitor.py` amostra a VRAM dedicada no Windows via PDH
+    (`\GPU Adapter Memory(*)\Dedicated Usage`, ~0,06 ms/amostra, zero dependências externas),
+    gravando `gpu_vram_used_mb`, `gpu_vram_used_mb_avg` e `gpu_vram_used_mb_peak` no relatório.
+  - `_inpaint_change_metrics`, `changed_pixels_in_fill_halo` e o hash de cache de `_learned_inpaint`
+    passam a operar em ROI local com verificação `np.array_equal` nas faixas externas.
 - `clean_ocr_text` troca o glifo `0` por `O` em tokens ASCII com pelo menos duas letras e
   sem outros dígitos; identificadores com outros números permanecem intactos. Essa
   normalização não usa nomes ou palavras específicas.

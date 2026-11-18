@@ -203,7 +203,7 @@ Guarda de memória (lida do ambiente por `komyst/config/settings.py`; ver Docume
 livre abaixo dos quais LaMa e FLUX se declaram indisponíveis. O FLUX mantém os pesos na VRAM
 por padrão (pico medido de ~0,7 GB de RAM no `sd-cli` com GPU de 8 GB); `FLUX_OFFLOAD_TO_CPU=1` passa
 `--offload-to-cpu` (~4,6 GB de RAM) para GPUs menores; `LAMA_MAX_CROP_PIXELS` (padrão
-`4000000`) limita a área do recorte do LaMa. Sem `psutil` a guarda não bloqueia.
+`4000000`) limita a área do recorte do LaMa e `LAMA_MAX_INFER_SIDE` (padrão `896`, mínimo `256`) limita o maior lado enviado à inferência DFT do LaMa (buckets DirectML `256..896`, recompondo na resolução original apenas dentro da máscara; antes do `sd-cli`/FLUX a sessão DirectML do LaMa é descarregada). Sem `psutil` a guarda não bloqueia.
 
 Entrega enxuta: `KEEP_WORK_FILES` (padrão `False`, `komyst/config/settings.py`) controla se, ao concluir
 com sucesso (status `finished`), o job apaga os arquivos de trabalho que o modo escolhido não entrega.
