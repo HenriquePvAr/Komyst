@@ -4680,7 +4680,10 @@ def _balloon_border_mask(image_bgr, lines):
     if image_bgr is None or not getattr(image_bgr, "size", 0) or not lines:
         return None
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    heights = [int(line.box[3]) for line in lines if line.box[3] > 0]
+    heights = [
+        min(int(line.box[2]), int(line.box[3])) if _vertical_cjk_line(line) else int(line.box[3])
+        for line in lines if line.box[3] > 0 and line.box[2] > 0
+    ]
     glyph = float(np.median(heights)) if heights else 20.0
     dark = (gray < 140).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(dark, 8)
@@ -4722,12 +4725,18 @@ def _border_separates(border, line_box, group):
         return False
     gx, gy, gw, gh = (int(v) for v in nearest.box)
     # Any convex balloon contains every segment joining corresponding interior points
-    # of two lines inside it (20%, 50%, 80% across each line's width). In a pinched
-    # figure-8 / offset double-lobe balloon, the centre-to-centre chord can thread the
-    # narrow neck while the 20% or 80% chord crosses the indented balloon border.
+    # of two lines inside it (20%, 50%, 80%). In a pinched figure-8 / offset double-lobe
+    # balloon, the centre-to-centre chord can thread the narrow neck while the 20% or
+    # 80% chord crosses the indented balloon border (across x for stacked rows, across y
+    # for side-by-side vertical columns).
+    horizontal_pair = abs((lx + lw / 2.0) - (gx + gw / 2.0)) > abs((ly + lh / 2.0) - (gy + gh / 2.0))
     for frac in (0.5, 0.2, 0.8):
-        p0 = np.array([lx + lw * frac, ly + lh / 2.0])
-        p1 = np.array([gx + gw * frac, gy + gh / 2.0])
+        if horizontal_pair:
+            p0 = np.array([lx + lw / 2.0, ly + lh * frac])
+            p1 = np.array([gx + gw / 2.0, gy + gh * frac])
+        else:
+            p0 = np.array([lx + lw * frac, ly + lh / 2.0])
+            p1 = np.array([gx + gw * frac, gy + gh / 2.0])
         steps = int(max(abs(p1 - p0))) + 1
         for t in np.linspace(0.0, 1.0, max(2, steps)):
             px, py = (p0 + (p1 - p0) * t).round().astype(int)
@@ -4759,13 +4768,39 @@ def _group_lines(lines, page_index=None, image_bgr=None):
         target.lines = reading_order(target.lines)
         target.text = clean_ocr_text(" ".join(item.text for item in target.lines))
 
+    # Transitive closure for vertical CJK columns: sorting input lines by (y, x) can
+    # visit the leftmost and rightmost columns of a balloon before the middle column
+    # that bridges them. Merge vertical CJK groups when a column in one neighbours
+    # the other without a balloon border between them.
+    merged_any = True
+    while merged_any and len(groups) > 1:
+        merged_any = False
+        for i in range(len(groups)):
+            if not _group_is_vertical_cjk(groups[i]):
+                continue
+            for j in range(i + 1, len(groups)):
+                if not _group_is_vertical_cjk(groups[j]):
+                    continue
+                if any(
+                    _line_belongs_to_group(ln, groups[i])
+                    and not any(_border_separates(border, ln.box, TextGroup(group_id="", lines=[gl])) for gl in groups[i].lines)
+                    for ln in groups[j].lines
+                ):
+                    groups[i].lines = reading_order(groups[i].lines + groups[j].lines)
+                    groups[i].text = clean_ocr_text(" ".join(item.text for item in groups[i].lines))
+                    groups.pop(j)
+                    merged_any = True
+                    break
+            if merged_any:
+                break
+
     # Two phrases set as side-by-side columns are two utterances (a manga double
     # balloon: "IN FACT, ARE YOU EATING PROPERLY, SENPAI?" beside "YOU'RE MUCH
     # LIGHTER THAN I EXPECTED."). Translated as one block, the Portuguese ran
     # across both outlines; each column is its own group.
     split = []
     for group in groups:
-        columns = _text_columns(group.lines)
+        columns = None if _group_is_vertical_cjk(group) else _text_columns(group.lines)
         if not columns:
             split.append(group)
             continue
@@ -4847,6 +4882,22 @@ def _line_belongs_to_group(line, group):
         and line_region_enclosed
     ):
         return False
+
+    # Vertical CJK lettering: a balloon is several columns side by side, so its lines
+    # are neighbours across x, not stacked rows. Must run before the horizontal-row
+    # height-ratio vetoes below (a 6-char column is naturally 3x taller than a 2-char
+    # column of the same font size; character size is column width, not column height).
+    lines_all = [line, *group.lines]
+    if (all(_vertical_cjk_line(item, loose=True) for item in lines_all)
+            and any(_vertical_cjk_line(item) for item in lines_all)):
+        med_col_w = float(np.median([max(1, item.box[2]) for item in group.lines]))
+        if max(lw, med_col_w) / max(1.0, min(lw, med_col_w)) > 2.6:
+            return False
+        column_w = max(lw, med_col_w)
+        gap_x = max(gx, lx) - min(gx + gw, lx + lw)
+        overlap_y = min(gy + gh, ly + lh) - max(gy, ly)
+        return gap_x <= 1.65 * column_w and overlap_y >= 0.25 * min(gh, lh)
+
     # Sound lettering beside dialogue is drawn at least 2.5x its height
     # ("THUMP" 133 px against 45 px text in A Wimp's Tower ep. 33).
     if (
@@ -4871,17 +4922,6 @@ def _line_belongs_to_group(line, group):
     ):
         return False
     avg_height = max(base_height, gh / max(1, len(group.lines)))
-
-    # Vertical CJK lettering: a balloon is several columns side by side, so its lines
-    # are neighbours across x, not stacked rows. A column overlapping the group's height
-    # and a column-width away belongs to it.
-    lines_all = [line, *group.lines]
-    if (all(_vertical_cjk_line(item, loose=True) for item in lines_all)
-            and any(_vertical_cjk_line(item) for item in lines_all)):
-        column_w = max(lw, float(np.median([item.box[2] for item in group.lines])))
-        gap_x = max(gx, lx) - min(gx + gw, lx + lw)
-        overlap_y = min(gy + gh, ly + lh) - max(gy, ly)
-        return gap_x <= 1.5 * column_w and overlap_y >= 0.3 * min(gh, lh)
 
     # Same reading row: a fragment sitting beside the group's text on the same
     # baseline is the tail of that line (an exclamation split off the end), not a
@@ -6326,7 +6366,14 @@ def _is_unenclosed_non_latin_sfx_on_art(group) -> bool:
     if metrics.get("dominant_white_enclosure") or metrics.get("open_white_narration") or metrics.get("open_dark_narration"):
         return False
     tilted = _line_tilt_degrees(lines[0]) >= 5.5
-    return tilted or bg in {"sfx_area", "speed_lines"}
+    short_kana_on_art = (
+        len(glyphs) <= 2
+        and bg == "textured_art"
+        and not bool(getattr(group, "inside_balloon_like_region", False))
+        and not bool(getattr(group, "inside_narration_box_like_region", False))
+        and bool(re.fullmatch(r"[\u3040-\u30ff\uac00-\ud7af]+", core))
+    )
+    return tilted or short_kana_on_art or bg in {"sfx_area", "speed_lines"}
 
 
 def _apply_disabled_sfx_policy(group):
@@ -19402,10 +19449,34 @@ def _label_list_items(group, text):
     return items
 
 
+def _clamp_horizontal_span_to_neighbors(
+    x0: int, x1: int, bx: int, by: int, bw: int, bh: int, neighbor_boxes
+) -> tuple[int, int]:
+    left, right = int(x0), int(x1)
+    for nb in neighbor_boxes or ():
+        nx, ny, nw, nh = (int(v) for v in nb)
+        ov_y = min(by + bh, ny + nh) - max(by, ny)
+        if ov_y < 0.2 * max(1, min(bh, nh)):
+            continue
+        if nx + nw <= bx + 6:
+            mid = (nx + nw + bx) // 2 + 4
+            left = max(left, mid)
+        elif nx >= bx + bw - 6:
+            mid = (bx + bw + nx) // 2 - 4
+            right = min(right, mid)
+    if right <= left + 16:
+        return bx, bx + max(16, bw)
+    return left, right
+
+
 def _draw_group_translation(img_bgr, group, font_path, strategy="primary", source_bgr=None):
     # Translations stored before the OCR normalised censoring can still carry the ideographs the
-    # OCR read for asterisks; they would be drawn as missing-glyph boxes.
+    # OCR read for asterisks; they would be drawn as missing-glyph boxes. Also strip decorative
+    # star/musical/heart dingbats (☆, ★, ♪, ♡) that bundled comic Latin fonts render as □ tofu.
     text = _normalize_censor_glyphs(group.translation or group.text or "")
+    stripped_dingbats = re.sub(r"[\u2600-\u27bf\U0001f300-\U0001faff]+", "", text).strip()
+    if stripped_dingbats:
+        text = stripped_dingbats
     if not text:
         return img_bgr
     if strategy == "caption_overlay":
@@ -19416,12 +19487,15 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     if vertical_source:
         # Vertical CJK columns are tall and narrow; the translation is set horizontally,
         # so it gets a block as wide as the columns are tall (centred, inside the page) -
-        # the balloon fit below narrows it to the balloon when one encloses the text.
+        # clamped at the midpoint toward any neighbouring balloon so double balloons never overlap.
         bx, by, bw, bh = (int(v) for v in draw_box)
         width_target = min(int(img_bgr.shape[1]), max(bw, int(0.85 * bh)))
         cx = bx + bw / 2.0
         nx = int(max(0, min(img_bgr.shape[1] - width_target, cx - width_target / 2.0)))
-        draw_box = (nx, by, width_target, bh)
+        cl0, cl1 = _clamp_horizontal_span_to_neighbors(
+            nx, nx + width_target, bx, by, bw, bh, getattr(group, "neighbor_text_boxes", None)
+        )
+        draw_box = (cl0, by, max(16, cl1 - cl0), bh)
     group.safe_area = tuple(draw_box)
     style = (
         _caption_overlay_text_style(img_bgr, draw_box)
@@ -19707,8 +19781,14 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         if _group_is_vertical_cjk(group):
             # A column's balloon is as wide as the column is tall, not 25 % wider than it.
             reach_x = max(reach_x, int(round(0.5 * gh)))
+        own_x0 = max(0, gx - reach_x)
+        own_x1 = min(balloon_area.shape[1], gx + gw + reach_x)
+        if _group_is_vertical_cjk(group):
+            own_x0, own_x1 = _clamp_horizontal_span_to_neighbors(
+                own_x0, own_x1, gx, gy, gw, gh, getattr(group, "neighbor_text_boxes", None)
+            )
         own_region = np.zeros(balloon_area.shape, dtype=bool)
-        own_region[max(0, gy - reach_y):gy + gh + reach_y, max(0, gx - reach_x):gx + gw + reach_x] = True
+        own_region[max(0, gy - reach_y):gy + gh + reach_y, own_x0:own_x1] = True
         balloon_area = balloon_area & own_region
         if not np.any(balloon_area):
             balloon_area = None

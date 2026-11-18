@@ -229,3 +229,23 @@ def test_spanish_and_french_accents_and_elisions_do_not_trigger_english_ocr_corr
     )
     assert valid is True, reason
 
+
+def test_vertical_cjk_three_columns_merge_despite_height_difference_and_y_jitter():
+    page = np.full((600, 600, 3), 252, dtype=np.uint8)
+    cv2.ellipse(page, (300, 300), (190, 210), 0, 0, 360, (20, 20, 20), 3)
+    # Leftmost short column arrives slightly higher in y than middle column
+    col_right = _mk_line("そして", (360, 180, 42, 220))
+    col_mid = _mk_line("ここが", (300, 195, 42, 210))
+    col_left = _mk_line("銀行!", (240, 185, 42, 82))
+    groups = ob._group_lines([col_right, col_mid, col_left], image_bgr=page)
+    assert len(groups) == 1
+    assert groups[0].text == "そして ここが 銀行!"
+
+
+def test_clamp_horizontal_span_prevents_side_by_side_vertical_balloon_overlap():
+    # Left lobe at x=100..160, right lobe at x=300..360
+    cl_left = ob._clamp_horizontal_span_to_neighbors(40, 340, 100, 100, 60, 280, [(300, 110, 60, 270)])
+    cl_right = ob._clamp_horizontal_span_to_neighbors(120, 420, 300, 110, 60, 270, [(100, 100, 60, 280)])
+    assert cl_left[1] < cl_right[0]
+
+
