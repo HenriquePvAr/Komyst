@@ -166,9 +166,24 @@ def _emit_pipeline_event(event_name, **fields):
 MAX_PIPELINE_PAGE_WORKERS = 4
 
 
-def _auto_page_workers():
+def _max_page_pixels(states) -> int:
+    peak = 0
+    for item in states or ():
+        if not isinstance(item, dict):
+            continue
+        arr = item.get("original_bgr")
+        if isinstance(arr, np.ndarray) and arr.ndim >= 2:
+            peak = max(peak, int(arr.shape[0]) * int(arr.shape[1]))
+            continue
+        hw = item.get("page_hw")
+        if isinstance(hw, (tuple, list)) and len(hw) >= 2:
+            peak = max(peak, int(hw[0]) * int(hw[1]))
+    return peak
+
+
+def _auto_page_workers(*, max_page_pixels: int = 0):
     """Pages rendered at once on this machine: a third of the logical cores and
-    one page per ~3 GB of free memory (LaMa + page buffers), at most 4."""
+    one page per ~3 GB of free memory (scaled up for high-megapixel raws), at most 4."""
     cores = os.cpu_count() or 2
     try:
         import psutil
@@ -176,7 +191,8 @@ def _auto_page_workers():
         free_gb = psutil.virtual_memory().available / 2**30
     except Exception:  # noqa: BLE001 - no psutil: assume a modest machine
         free_gb = 6.0
-    return max(1, min(MAX_PIPELINE_PAGE_WORKERS, cores // 3, int(free_gb // 3)))
+    gb_per_worker = 3.0 * max(1.0, float(max_page_pixels) / 3_500_000.0) if max_page_pixels > 0 else 3.0
+    return max(1, min(MAX_PIPELINE_PAGE_WORKERS, cores // 3, int(free_gb // gb_per_worker)))
 
 
 _DELIBERATE_PRESERVE_REASONS = frozenset({
@@ -215,11 +231,11 @@ def _share_native_threads(workers):
         pass
 
 
-def _pipeline_page_workers():
+def _pipeline_page_workers(*, max_page_pixels: int = 0):
     raw = os.environ.get("PIPELINE_PAGE_WORKERS", str(getattr(config, "PIPELINE_PAGE_WORKERS", "auto")))
     text = str(raw).strip().lower()
     if text in {"", "auto"}:
-        return _auto_page_workers()
+        return _auto_page_workers(max_page_pixels=max_page_pixels)
     try:
         value = int(text)
     except (TypeError, ValueError) as exc:
@@ -319,16 +335,17 @@ def _residual_sweep_known_boxes(state):
     return boxes
 
 
-def _auto_fix_residual_sfx(page_result, page_state, ocr_lang: str = "en"):
+def _auto_fix_residual_sfx(page_result, page_state, ocr_lang: str | None = None):
     """Inject short sweep reads only after normal visual SFX classification."""
     from komyst.ocr import ocr_models
 
     residual_started = time.perf_counter()
+    effective_lang = ocr_lang if ocr_lang is not None else str(page_state.get("ocr_lang") or "en")
     groups = page_state.get("groups", []) or []
     original = page_state.get("original_bgr")
     if not isinstance(original, np.ndarray) or original.size == 0:
         return page_result
-    if not ocr_models.source_is_english(ocr_lang):
+    if not ocr_models.source_is_english(effective_lang):
         page_state["residual_sweep"] = []
         page_state["residual_sweep_status"] = {
             "status": "not_applicable",
@@ -437,7 +454,7 @@ def process_pre_translation_pages(
     Results are returned in page order; all aggregate merging remains with the
     caller thread. workers=1 intentionally uses the legacy direct call path.
     """
-    workers = _pipeline_page_workers()
+    workers = _pipeline_page_workers(max_page_pixels=_max_page_pixels(page_states))
 
     def run_one(state):
         perf_start = _perf_offset_ns()
@@ -458,7 +475,9 @@ def process_pre_translation_pages(
             previous_recorder = ocr_line_provenance.active()
             ocr_line_provenance.activate(result.page_recorder)
             try:
-                result = _auto_fix_residual_sfx(result, dict(result.page_state), ocr_lang=ocr_lang)
+                sweep_state = dict(result.page_state)
+                sweep_state.setdefault("ocr_lang", ocr_lang)
+                result = _auto_fix_residual_sfx(result, sweep_state)
             finally:
                 ocr_line_provenance.activate(previous_recorder)
             if result.page_recorder is not None:
@@ -1776,7 +1795,7 @@ def process_post_translation_page(state, *, diagnostic_folder=None, targeted_reg
 def process_post_translation_pages(page_states, *, diagnostic_folder=None, targeted_regression=False,
                                    translator=None, translation_retry_records=None,
                                    force=False, retry_lock=None, job_id: str = ""):
-    workers = _pipeline_page_workers()
+    workers = _pipeline_page_workers(max_page_pixels=_max_page_pixels(page_states))
     source_recorder = ocr_line_provenance.active()
     if workers == 1:
         return [process_post_translation_page(state, diagnostic_folder=diagnostic_folder,
@@ -5536,7 +5555,7 @@ def _resolve_layout_overflow_before_settlement(
         return retried_total
 
     pending = [state for state in page_states if state.get("status") != "completed"]
-    workers = min(_pipeline_page_workers(), max(1, len(pending)))
+    workers = min(_pipeline_page_workers(max_page_pixels=_max_page_pixels(pending)), max(1, len(pending)))
     # The layout check renders every page once (minutes on large pages): report it, or the
     # UI sits at "translation 0/N" as if the job had frozen.
     progress_lock = threading.Lock()

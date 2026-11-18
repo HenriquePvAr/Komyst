@@ -116,21 +116,55 @@ def pdf_page_manifest(image_paths):
     }
 
 
+class _StreamingRgbPdfPage(Image.Image):
+    """Lazy RGB page wrapper that decodes on demand and frees pixels once written."""
+
+    def __init__(self, path, size):
+        super().__init__()
+        self._path = path
+        self._size = tuple(size)
+        self._mode = "RGB"
+        self.info = {}
+        self._im = None
+        self._rgb_owner = None
+
+    def load(self):
+        if self._im is None:
+            with Image.open(self._path) as src:
+                rgb = to_rgb(src)
+            rgb.load()
+            self._rgb_owner = rgb
+            self._im = rgb.im
+        return super().load()
+
+    def seek(self, frame):
+        if frame == 0:
+            self.load()
+            return
+        self.close()
+        raise EOFError
+
+    def close(self):
+        if self._rgb_owner is not None:
+            self._rgb_owner.close()
+            self._rgb_owner = None
+        self._im = None
+
+
 def generate_pdf(image_paths, pdf_path):
     if not image_paths:
         raise ValueError("Nenhuma imagem fornecida para gerar PDF.")
 
-    pil_imgs = []
     try:
         with tempfile.TemporaryDirectory(prefix="komyst-pdf-pages-") as temporary:
-            physical_paths = []
+            streaming_pages = []
             for source_index, path in enumerate(image_paths):
                 try:
                     with Image.open(path) as img:
                         if img.width <= 0 or img.height <= 0:
                             raise ValueError("invalid_image_dimensions")
                         if img.height <= MAX_LOGICAL_PAGE_HEIGHT:
-                            physical_paths.append(path)
+                            streaming_pages.append(_StreamingRgbPdfPage(path, img.size))
                             continue
                         # PDF 1.4 caps a page dimension at 14,400 points. Pillow
                         # writes at 72 dpi (one source pixel per point), so segment
@@ -142,29 +176,29 @@ def generate_pdf(image_paths, pdf_path):
                             tile_path = Path(temporary) / (
                                 f"source-{source_index:05d}-part-{tile_index:03d}.png"
                             )
-                            img.crop((0, top, img.width, bottom)).save(tile_path, "PNG")
-                            physical_paths.append(tile_path)
+                            tile = img.crop((0, top, img.width, bottom))
+                            try:
+                                tile.save(tile_path, "PNG")
+                                streaming_pages.append(_StreamingRgbPdfPage(tile_path, tile.size))
+                            finally:
+                                tile.close()
                 except Exception as exc:
                     print(f"Erro ao abrir imagem para PDF, pulando {path}: {exc}")
 
-            for path in physical_paths:
-                with Image.open(path) as img:
-                    pil_imgs.append(to_rgb(img))
-
-            if not pil_imgs:
+            if not streaming_pages:
                 raise ValueError("Nenhuma imagem valida foi carregada para gerar o PDF.")
 
-            first = pil_imgs[0]
-            rest = pil_imgs[1:]
-            first.save(pdf_path, "PDF", save_all=True, append_images=rest)
+            try:
+                first, rest = streaming_pages[0], streaming_pages[1:]
+                first.save(pdf_path, "PDF", save_all=True, append_images=rest)
+            finally:
+                for page in streaming_pages:
+                    page.close()
             print(f"PDF gerado com sucesso: {pdf_path}")
     except Exception as exc:
         if isinstance(exc, ValueError) and str(exc).startswith("Nenhuma imagem"):
             raise
         raise RuntimeError(f"Erro ao gerar PDF: {exc}") from exc
-    finally:
-        for img in pil_imgs:
-            img.close()
 
 
 def generate_smart_webtoon_pdf(

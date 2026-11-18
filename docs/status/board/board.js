@@ -28,6 +28,22 @@ window.BOARD = {
   },
   cards: [
     {
+      id: 'STAGE2-ROI-PERF-SFX-20261117',
+      title: 'Etapa 2 — Render/validação por ROI em 12 MP, PDF em streaming, costura CJK vertical, pré-filtro re-OCR e política estrutural de SFX curtos',
+      domain: 'pipeline',
+      column: 'dev',
+      env: 'branch',
+      updated: '2026-11-17',
+      summary: 'Converte desenho tipográfico, inclinação, métrica de ocupação e validação visual (_enforce_visual_bounds) para recortes ROI locais em vez da página inteira; limita workers paralelos por megapixels; transmite páginas uma a uma na geração do PDF; funde fragmentos verticais CJK partidos entre tiles; filtra containers vazios antes do re-OCR de redescoberta; classifica onomatopeias curtas estruturalmente conforme TRANSLATE_SFX.',
+      risk: 'TESTED_OFFLINE: 91 testes passando (test_stage2_perf_and_sfx, test_multilingual_ocr, test_residual_sweep, test_sfx_output_preference, test_pdf_split_regressions). MEDIDO em 12 MP (4093x2894): tentativa de render+validação caiu de 1516,0 ms / 283,2 MB para 136,2 ms / 103,5 MB (11,1x mais rápido); exportação PDF 10x12 MP em 0,73 s com pico Python de 1,87 MB e no máximo 1 página RGB aberta.',
+      blockedBy: 'Próximas etapas: Etapa 3 (buckets fixos/escala máxima LaMa, fast-path em arte texturizada, telemetria VRAM Windows e descarga DirectML antes do FLUX) e Etapa 4 (contexto DeepL, retry de transporte em wallet-reserve, revisão documental e replay de capítulos).',
+      delivered: [
+        'Renderização, cisalhamento e _enforce_visual_bounds por ROI local (1516,0 ms -> 136,2 ms em 12 MP, -91,0 %)',
+        'Streaming de páginas RGB em generate_pdf (pico de 1 página decodificada) + limite de workers para páginas >= 6 MP / >= 10 MP',
+        'Fusão de costura vertical CJK entre tiles, pré-filtro Canny em _masked_page_rediscovery e SFX curtos estruturais subordinados a TRANSLATE_SFX'
+      ]
+    },
+    {
       id: 'MULTILANG-STAGE1-20261117',
       title: 'Etapa 1 — OCR multilíngue canônico, corte do Paddle fora do inglês e resgate LaMa CJK/ES/RU',
       domain: 'pipeline',

@@ -1066,7 +1066,27 @@ tradutor.
   desenhadas na horizontal numa caixa alargada; o tamanho da fonte usa a largura da coluna e o
   teto `MAX_FONT_SIZE` sobe até esse tamanho.
 - `_deduplicate_tiled_ocr_lines` descarta leituras ≥ 80 % cobertas por uma leitura mais longa
-  (fragmentos cortados entre tiles).
+  (fragmentos cortados entre tiles) e funde fragmentos verticais CJK na mesma coluna que se
+  sobrepõem verticalmente na costura entre tiles, concatenando o sufixo não duplicado (ex.: `ABCD`
+  + `CDEF` → `ABCDEF`).
+- **Otimização por recorte local (ROI), streaming de PDF e SFX curtos (2026-11-17, IMPLEMENTADO):**
+  - `_draw_group_translation`, `_draw_rotated_caption_translation`, `_match_source_slant`,
+    `_translated_text_occupancy_metrics` e `_enforce_visual_bounds` (`komyst/ocr/ocr_balloon.py`)
+    operam sobre um recorte local (ROI) ao redor do balão/máscara em vez da página inteira,
+    verificando que zero pixels mudam fora do ROI. Em página de 12 MP (`4093×2894`), o custo por
+    tentativa caiu de **1516,0 ms / 283,2 MB** para **136,2 ms / 103,5 MB** (**11,1× mais rápido**,
+    -91,0 % de latência).
+  - `benchmark_pipeline._auto_page_workers` reduz automaticamente os workers paralelos de página
+    para `2` em ≥ 6 MP e `1` em ≥ 10 MP, evitando múltiplos buffers simultâneos de alta resolução.
+  - `komyst/export/pdf.py` (`_StreamingRgbPdfPage`) transmite páginas ao gerador PDF do Pillow uma
+    a uma, decodificando no máximo 1 página RGB por vez em memória (`1,87 MB` de pico Python em
+    10×12 MP) e mantendo PDF de revisão única com contagem física exata.
+  - `_masked_page_rediscovery` aplica pré-filtro estrutural de bordas Canny antes de chamar OCR de
+    redescoberta em containers sem traço descoberto.
+  - `_is_short_expressive_sfx_text` reconhece estruturalmente onomatopeias/vocalizações curtas de 1–2
+    tokens (letras alongadas, tokens sem vogais de baixa frequência Zipf, interjeições vocálicas e
+    entradas do glossário SFX), respeitando `TRANSLATE_SFX=False` (`sfx_translation_disabled`) sem
+    lista fixa de nomes ou séries.
 - `clean_ocr_text` troca o glifo `0` por `O` em tokens ASCII com pelo menos duas letras e
   sem outros dígitos; identificadores com outros números permanecem intactos. Essa
   normalização não usa nomes ou palavras específicas.

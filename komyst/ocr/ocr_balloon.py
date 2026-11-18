@@ -3024,6 +3024,51 @@ def _is_sound_lettering(group):
     return 0 < len(words) <= 2 and translate_sfx_fuzzy(group.text) is not None
 
 
+_STRETCHED_LETTER_RE = re.compile(r"([A-Za-z])\1\1")
+_VOWEL_CLUSTER_RE = re.compile(r"[AEIOUY]+")
+
+
+def _is_short_expressive_sfx_text(text: str, *, protected_names=()) -> bool:
+    """True when 1-2 short ASCII tokens have structural onomatopoeia/scream traits.
+
+    Ordinary high-frequency English dialogue ("WAIT!", "STOP!", "NO!", "RUN!") and
+    multi-syllable proper names are excluded structurally from syllable shape and
+    lexical frequency, with no hardcoded word, character, or series list.
+    """
+    from komyst.translation.sfx_glossary import translate_sfx_fuzzy
+
+    cleaned = clean_ocr_text(str(text or ""))
+    if not cleaned or _NON_LATIN_SCRIPT_CHARS_RE.search(cleaned):
+        return False
+    words = re.findall(r"[A-Za-z]+", cleaned)
+    if not (1 <= len(words) <= 2) or sum(len(w) for w in words) > 16:
+        return False
+    upper_names = {str(n).strip().upper() for n in (protected_names or ()) if str(n).strip()}
+    for w in words:
+        wu = w.upper()
+        if wu in upper_names or wu in region_taxonomy._STORY_CLAUSE_MARKERS:
+            return False
+        if region_taxonomy.word_zipf(w.lower()) >= 4.4:
+            return False
+    if any(_STRETCHED_LETTER_RE.search(w) for w in words):
+        return True
+    if translate_sfx_fuzzy(cleaned) is not None:
+        return True
+    if len(words) == 1:
+        w = words[0]
+        wu = w.upper()
+        zipf = region_taxonomy.word_zipf(w.lower())
+        if _is_nonlexical_vocalization_token({wu}):
+            return True
+        if 2 <= len(wu) <= 5 and len(_VOWEL_CLUSTER_RE.findall(wu)) == 0 and zipf < 3.5:
+            return True
+        if 2 <= len(wu) <= 4 and zipf < 1.5 and len(_VOWEL_CLUSTER_RE.findall(wu)) <= 1 and wu[-1] not in "AEIOU":
+            return True
+        if len(wu) == 3 and zipf < 3.2 and not region_taxonomy.is_english_word(wu) and wu.endswith("H"):
+            return True
+    return False
+
+
 def _finalize_translation_failure(
     group,
     reason,
@@ -3035,11 +3080,18 @@ def _finalize_translation_failure(
     if (
         reason == "translation_not_rendered_after_validation" and _is_sound_lettering(group)
     ) or (
-        # A lone ordinary word or sound the model handed back unchanged ("SLIP", "WAAAH") is an
+        # A lone ordinary word or sound the model handed back unchanged ("SLIP", "WAAAH", "URP.") is an
         # interjection with nothing to translate; it is kept as lettering, not sent to review.
         reason == "untranslated_source_after_retries"
-        and group_has_name_only_shape(group)
-        and _lone_word_is_common_or_sound(group)
+        and (
+            _is_short_expressive_sfx_text(
+                group.text, protected_names=getattr(group, "detected_proper_names", None) or ()
+            )
+            or (
+                len(re.findall(r"[A-Za-z][A-Za-z’'-]*", clean_ocr_text(group.text))) == 1
+                and _lone_word_is_common_or_sound(group)
+            )
+        )
     ):
         # A sound effect whose translation could not be drawn safely keeps its
         # own lettering - part of the art, nothing a reader loses - instead of
@@ -6130,6 +6182,16 @@ def _apply_disabled_sfx_policy(group):
 
 
 def _apply_classification_policy(group):
+    if (
+        not config.TRANSLATE_SFX
+        and group.classification in {"speech", "narration", "thought", "unknown"}
+        and not bool(getattr(group, "preserve_as_name", False))
+        and len(getattr(group, "lines", None) or ()) <= 2
+        and _is_short_expressive_sfx_text(
+            group.text, protected_names=getattr(group, "detected_proper_names", None) or ()
+        )
+    ):
+        group.classification = "sfx"
     _apply_disabled_sfx_policy(group)
     if group.classification == "sfx" and not config.TRANSLATE_SFX:
         return
@@ -9633,6 +9695,37 @@ def _masked_page_rediscovery(original_bgr, lines, ocr_lang, page_index=None):
             painted[y1:y2, x1:x2] = np.median(ring, axis=0).astype(original_bgr.dtype)
         covered[y1:y2, x1:x2] = True
     try:
+        # Skip a second full-page tiled OCR when painting out known lines leaves
+        # no uncovered glyph-shaped contrast components anywhere on the page.
+        scale = min(1.0, 1200.0 / float(max(height, width, 1)))
+        small_bgr = (
+            cv2.resize(painted, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+            if scale < 1.0 else painted
+        )
+        small_cov = (
+            cv2.resize(covered.astype(np.uint8), (small_bgr.shape[1], small_bgr.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+            if scale < 1.0 else covered
+        )
+        edges = cv2.Canny(cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY), 70, 170)
+        if np.any(small_cov):
+            dil = cv2.dilate(small_cov.astype(np.uint8), np.ones((5, 5), dtype=np.uint8), iterations=1) > 0
+            edges[dil] = 0
+        n_comp, _, c_stats, _ = cv2.connectedComponentsWithStats(edges, 8)
+        sh, sw = edges.shape[:2]
+        glyph_like = 0
+        for cid in range(1, n_comp):
+            cw = int(c_stats[cid, cv2.CC_STAT_WIDTH])
+            ch = int(c_stats[cid, cv2.CC_STAT_HEIGHT])
+            ca = int(c_stats[cid, cv2.CC_STAT_AREA])
+            if ca >= 6 and 3 <= cw <= int(0.65 * sw) and 3 <= ch <= int(0.65 * sh):
+                if max(cw, ch) / max(1, min(cw, ch)) <= 14.0:
+                    glyph_like += 1
+                    if glyph_like >= 2:
+                        break
+        if glyph_like < 2:
+            record["reason"] = "masked_rediscovery_no_uncovered_ink"
+            record["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
+            return lines, record
         found = engines[0].detect_lines(painted, page=page_index)
     except Exception as exc:  # noqa: BLE001 - recorded, never fatal
         errors.append({"engine": engines[0].engine, "stage": "detect", "exception_type": type(exc).__name__})
@@ -16981,28 +17074,34 @@ def _translated_text_occupancy_metrics(cleaned_bgr, rendered_bgr, group):
     }
     if cleaned_bgr is None or rendered_bgr is None or group is None:
         return empty
-    if np.asarray(cleaned_bgr).shape != np.asarray(rendered_bgr).shape:
+    c_arr = np.asarray(cleaned_bgr)
+    r_arr = np.asarray(rendered_bgr)
+    if c_arr.shape != r_arr.shape:
         return empty
-    changed = (
-        np.max(
-            np.abs(
-                np.asarray(rendered_bgr, dtype=np.int16)
-                - np.asarray(cleaned_bgr, dtype=np.int16)
-            ),
-            axis=2,
-        ) > 8
-    )
+    h_img, w_img = c_arr.shape[:2]
     gx, gy, gw, gh = [int(v) for v in group.box]
-    h_img, w_img = changed.shape[:2]
     gx1, gy1 = max(0, gx), max(0, gy)
     gx2, gy2 = min(w_img, gx + max(1, gw)), min(h_img, gy + max(1, gh))
-    group_pixels = int(np.count_nonzero(changed[gy1:gy2, gx1:gx2]))
     group_area = max(1, (gx2 - gx1) * (gy2 - gy1))
     tx, ty, tw, th = [int(v) for v in (getattr(group, "translation_box", None) or group.box)]
     tx1, ty1 = max(0, tx), max(0, ty)
     tx2, ty2 = min(w_img, tx + max(1, tw)), min(h_img, ty + max(1, th))
-    box_pixels = int(np.count_nonzero(changed[ty1:ty2, tx1:tx2]))
     box_area = max(1, (tx2 - tx1) * (ty2 - ty1))
+    ux1, uy1 = min(gx1, tx1), min(gy1, ty1)
+    ux2, uy2 = max(gx2, tx2), max(gy2, ty2)
+    if ux2 <= ux1 or uy2 <= uy1:
+        return empty
+    changed_roi = (
+        np.max(
+            np.abs(
+                r_arr[uy1:uy2, ux1:ux2].astype(np.int16)
+                - c_arr[uy1:uy2, ux1:ux2].astype(np.int16)
+            ),
+            axis=2,
+        ) > 8
+    )
+    group_pixels = int(np.count_nonzero(changed_roi[gy1 - uy1:gy2 - uy1, gx1 - ux1:gx2 - ux1]))
+    box_pixels = int(np.count_nonzero(changed_roi[ty1 - uy1:ty2 - uy1, tx1 - ux1:tx2 - ux1]))
     return {
         "translated_text_pixels": group_pixels,
         "translated_text_occupancy_ratio": round(float(group_pixels / group_area), 6),
@@ -18889,8 +18988,7 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
     group.region_hue = style.hue
     group.typography_profile = dict(typography_profile)
 
-    pil_img = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil_img)
+    draw = ImageDraw.Draw(Image.new("RGB", (8, 8)))
     x, y, w, h = draw_box
 
     safe_padding = config.TEXT_SAFE_PADDING
@@ -19282,22 +19380,40 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         group.translation_validation_reason = "translation_effect_outside_safe_area"
         return img_bgr
 
+    img_h, img_w = img_bgr.shape[:2]
+    roi_pad = max(48, int(round(float(style.glow_radius or 0) * 3.0)) + 24)
+    rx1 = max(0, min(x, ex1, int(group.box[0])) - roi_pad)
+    ry1 = max(0, min(y, ey1, int(group.box[1])) - roi_pad)
+    rx2 = min(img_w, max(x + w, ex2, int(group.box[0] + group.box[2])) + roi_pad)
+    ry2 = min(img_h, max(y + h, ey2, int(group.box[1] + group.box[3])) + roi_pad)
+    if rx2 <= rx1 or ry2 <= ry1:
+        return img_bgr
+
+    pil_img = Image.fromarray(cv2.cvtColor(img_bgr[ry1:ry2, rx1:rx2], cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    local_dx = draw_x - rx1
+    local_dy = draw_y - ry1
+    local_shape_layout = (
+        [(line, lx - rx1, ly - ry1) for line, lx, ly in shape_layout]
+        if shape_layout else None
+    )
+
     if style.glow_fill and style.glow_radius > 0:
         glow = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
         glow_draw = ImageDraw.Draw(glow)
-        if shape_layout:
-            for line, lx, ly in shape_layout:
+        if local_shape_layout:
+            for line, lx, ly in local_shape_layout:
                 glow_draw.text((lx, ly), line, font=font, fill=style.glow_fill + (190,),
                                stroke_width=max(style.stroke_width + 1, 2), stroke_fill=style.glow_fill + (210,))
         elif line_plan:
             _draw_multiline_per_font(
-                glow_draw, (draw_x, draw_y), lines, line_plan,
+                glow_draw, (local_dx, local_dy), lines, line_plan,
                 fill=style.glow_fill + (190,), spacing=spacing,
                 stroke_width=max(style.stroke_width + 1, 2), stroke_fill=style.glow_fill + (210,),
             )
         else:
             glow_draw.multiline_text(
-                (draw_x, draw_y),
+                (local_dx, local_dy),
                 text_block,
                 font=font,
                 fill=style.glow_fill + (190,),
@@ -19311,10 +19427,10 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
         draw = ImageDraw.Draw(pil_img)
 
     if style.shadow_fill:
-        shadow_x = draw_x + style.shadow_offset[0]
-        shadow_y = draw_y + style.shadow_offset[1]
-        if shape_layout:
-            for line, lx, ly in shape_layout:
+        shadow_x = local_dx + style.shadow_offset[0]
+        shadow_y = local_dy + style.shadow_offset[1]
+        if local_shape_layout:
+            for line, lx, ly in local_shape_layout:
                 draw.text((lx + style.shadow_offset[0], ly + style.shadow_offset[1]), line,
                           font=font, fill=style.shadow_fill)
         elif line_plan:
@@ -19332,19 +19448,19 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
                 align=text_align,
             )
 
-    if shape_layout:
-        for line, lx, ly in shape_layout:
+    if local_shape_layout:
+        for line, lx, ly in local_shape_layout:
             draw.text((lx, ly), line, font=font, fill=style.fill,
                       stroke_width=style.stroke_width, stroke_fill=style.stroke_fill)
     elif line_plan:
         _draw_multiline_per_font(
-            draw, (draw_x, draw_y), lines, line_plan,
+            draw, (local_dx, local_dy), lines, line_plan,
             fill=style.fill, spacing=spacing,
             stroke_width=style.stroke_width, stroke_fill=style.stroke_fill,
         )
     else:
         draw.multiline_text(
-            (draw_x, draw_y),
+            (local_dx, local_dy),
             text_block,
             font=font,
             fill=style.fill,
@@ -19354,11 +19470,21 @@ def _draw_group_translation(img_bgr, group, font_path, strategy="primary", sourc
             stroke_fill=style.stroke_fill,
         )
 
-    rendered_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    return _match_source_slant(img_bgr, rendered_bgr, group, typography_profile, draw_box)
+    roi_rendered = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    roi_slanted = _match_source_slant(
+        img_bgr[ry1:ry2, rx1:rx2],
+        roi_rendered,
+        group,
+        typography_profile,
+        (x - rx1, y - ry1, w, h),
+        origin=(rx1, ry1),
+    )
+    rendered_bgr = img_bgr.copy()
+    rendered_bgr[ry1:ry2, rx1:rx2] = roi_slanted
+    return rendered_bgr
 
 
-def _match_source_slant(base_bgr, rendered_bgr, group, profile, draw_box):
+def _match_source_slant(base_bgr, rendered_bgr, group, profile, draw_box, *, origin=(0, 0)):
     """Lean the drawn translation like the source lettering when the font did not.
 
     The source slant is measured on the original glyphs (``glyph_style``); the
@@ -19414,7 +19540,8 @@ def _match_source_slant(base_bgr, rendered_bgr, group, profile, draw_box):
     moved = np.any(out != base_bgr, axis=2)
     if np.any(moved):
         mys, mxs = np.nonzero(moved)
-        sheared_box = (int(mxs.min()), int(mys.min()),
+        off_x, off_y = int(origin[0]), int(origin[1])
+        sheared_box = (off_x + int(mxs.min()), off_y + int(mys.min()),
                        int(mxs.max()) - int(mxs.min()) + 1, int(mys.max()) - int(mys.min()) + 1)
         for attr in ("translation_box", "effect_box"):
             old_box = getattr(group, attr, None)
@@ -19451,11 +19578,11 @@ def _draw_rotated_caption_translation(img_bgr, group, font_path, text):
         return img_bgr
 
     caption_lines, font, font_size = fitted
-    canvas = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    rotated_tiles = []
     paste_boxes = []
+    probe = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    probe_draw = ImageDraw.Draw(probe)
     for caption, geometry in zip(caption_lines, geometries):
-        probe = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
-        probe_draw = ImageDraw.Draw(probe)
         bbox = probe_draw.textbbox(
             (0, 0),
             caption,
@@ -19483,7 +19610,7 @@ def _draw_rotated_caption_translation(img_bgr, group, font_path, text):
         cx, cy = geometry["center"]
         px = int(round(cx - rotated.width / 2))
         py = int(round(cy - rotated.height / 2))
-        canvas.alpha_composite(rotated, (px, py))
+        rotated_tiles.append((rotated, px, py))
         paste_boxes.append((px, py, rotated.width, rotated.height))
 
     translation_box = _union_boxes(paste_boxes)
@@ -19495,14 +19622,26 @@ def _draw_rotated_caption_translation(img_bgr, group, font_path, text):
     group.font_size = int(font_size)
     group.text_overflow_ratio = float(overflow)
     group.color_name = "caption_overlay"
-    group.region_brightness = float(np.mean(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)))
+    sx, sy, sw, sh = (int(v) for v in safe_area)
+    s_crop = img_bgr[max(0, sy):min(img_bgr.shape[0], sy + max(1, sh)), max(0, sx):min(img_bgr.shape[1], sx + max(1, sw))]
+    group.region_brightness = float(np.mean(cv2.cvtColor(s_crop if s_crop.size else img_bgr[:1, :1], cv2.COLOR_BGR2GRAY)))
     group.region_saturation = 0.0
     group.region_hue = 0.0
     if config.REJECT_TEXT_OVERFLOW and overflow > config.MAX_TEXT_OVERFLOW_RATIO:
         group.translation_valid = False
         group.translation_validation_reason = "caption_translation_outside_safe_area"
         return img_bgr
-    return cv2.cvtColor(np.asarray(canvas.convert("RGB")), cv2.COLOR_RGB2BGR)
+    tx, ty, tw_u, th_u = (int(v) for v in translation_box)
+    rx1, ry1 = max(0, tx - 4), max(0, ty - 4)
+    rx2, ry2 = min(img_bgr.shape[1], tx + tw_u + 4), min(img_bgr.shape[0], ty + th_u + 4)
+    if rx2 <= rx1 or ry2 <= ry1:
+        return img_bgr
+    canvas = Image.fromarray(cv2.cvtColor(img_bgr[ry1:ry2, rx1:rx2], cv2.COLOR_BGR2RGB)).convert("RGBA")
+    for rotated, px, py in rotated_tiles:
+        canvas.alpha_composite(rotated, (px - rx1, py - ry1))
+    out = img_bgr.copy()
+    out[ry1:ry2, rx1:rx2] = cv2.cvtColor(np.asarray(canvas.convert("RGB")), cv2.COLOR_RGB2BGR)
+    return out
 
 
 def _caption_line_geometry(line):
@@ -20585,15 +20724,41 @@ def _enforce_visual_bounds(
             "visual_validation_passed": False,
             "reason": "shape_mismatch",
         }
-    gray_diff = cv2.absdiff(
-        cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY),
-        cv2.cvtColor(final_bgr, cv2.COLOR_BGR2GRAY),
-    )
+    page_h, page_w = original_bgr.shape[:2]
+    page_pixels = max(1, page_h * page_w)
+    diff3 = cv2.absdiff(original_bgr, final_bgr)
+    max_ch = cv2.max(cv2.max(diff3[:, :, 0], diff3[:, :, 1]), diff3[:, :, 2])
+    mask_u8 = (allowed_mask > 0).astype(np.uint8) * 255
+    active_u8 = cv2.bitwise_or(max_ch, mask_u8)
+    ax, ay, aw, ah = cv2.boundingRect(active_u8)
+    if aw <= 0 or ah <= 0:
+        rx1, ry1, rx2, ry2 = 0, 0, min(page_w, 8), min(page_h, 8)
+    else:
+        pad_act = 32
+        if group is not None and group.safe_area:
+            sx_b, sy_b, sw_b, sh_b = [int(v) for v in group.safe_area]
+            rx1 = max(0, min(ax, sx_b, int(group.box[0])) - pad_act)
+            ry1 = max(0, min(ay, sy_b, int(group.box[1])) - pad_act)
+            rx2 = min(page_w, max(ax + aw, sx_b + max(1, sw_b), int(group.box[0] + group.box[2])) + pad_act)
+            ry2 = min(page_h, max(ay + ah, sy_b + max(1, sh_b), int(group.box[1] + group.box[3])) + pad_act)
+        else:
+            rx1 = max(0, ax - pad_act)
+            ry1 = max(0, ay - pad_act)
+            rx2 = min(page_w, ax + aw + pad_act)
+            ry2 = min(page_h, ay + ah + pad_act)
+
+    orig_roi = original_bgr[ry1:ry2, rx1:rx2]
+    final_roi = final_bgr[ry1:ry2, rx1:rx2]
+    allow_roi = mask_u8[ry1:ry2, rx1:rx2] > 0
+
+    orig_gray_roi = cv2.cvtColor(orig_roi, cv2.COLOR_BGR2GRAY)
+    final_gray_roi = cv2.cvtColor(final_roi, cv2.COLOR_BGR2GRAY)
+    gray_diff = cv2.absdiff(orig_gray_roi, final_gray_roi)
     changed = gray_diff > config.VISUAL_DIFF_THRESHOLD
-    allowed = allowed_mask > 0
+    allowed = allow_roi
     outside = changed & ~allowed
     inside = changed & allowed
-    outside_ratio = float(np.mean(outside))
+    outside_ratio = float(np.count_nonzero(outside)) / float(page_pixels)
     outside_u8 = outside.astype(np.uint8) * 255
     count, _, stats, _ = cv2.connectedComponentsWithStats(outside_u8, 8)
     outside_components = [
@@ -20618,19 +20783,18 @@ def _enforce_visual_bounds(
     border_change_ratio = 0.0
     largest_changed_border_component = 0
     if group is not None and group.safe_area:
-        original_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY)
-        original_edges = cv2.Canny(original_gray, 55, 155) > 0
-        text_exclusion = _build_text_mask(
-            original_bgr.shape,
-            [group],
-            padding=max(
-                6,
-                min(
-                    12,
-                    int(config.MAX_MASK_EXPANSION) + 2,
-                ),
-            ),
-        ) > 0
+        original_edges = cv2.Canny(orig_gray_roi, 55, 155) > 0
+        text_pad = max(6, min(12, int(config.MAX_MASK_EXPANSION) + 2))
+        text_exclusion = np.zeros(orig_gray_roi.shape[:2], dtype=np.uint8)
+        for line in getattr(group, "lines", None) or ():
+            lx, ly, lw, lh = (int(v) for v in line.box)
+            tx1 = max(0, lx - rx1 - text_pad)
+            ty1 = max(0, ly - ry1 - text_pad)
+            tx2 = min(orig_gray_roi.shape[1], lx + lw - rx1 + text_pad)
+            ty2 = min(orig_gray_roi.shape[0], ly + lh - ry1 + text_pad)
+            if tx2 > tx1 and ty2 > ty1:
+                text_exclusion[ty1:ty2, tx1:tx2] = 255
+        text_exclusion_bool = text_exclusion > 0
         # A text safe-area is not a balloon contour.  Protect real structural
         # edges that were changed inside the allowed mask, excluding source
         # glyphs and their anti-alias halo.  Only the perimeter band of the
@@ -20638,11 +20802,11 @@ def _enforce_visual_bounds(
         # or tiny character icons inside a balloon must not be mistaken for the
         # outer contour.
         sx, sy, sw, sh = [int(value) for value in group.safe_area]
-        safe_band = np.zeros(original_bgr.shape[:2], dtype=np.uint8)
-        sx1 = max(0, sx)
-        sy1 = max(0, sy)
-        sx2 = min(original_bgr.shape[1], sx + max(1, sw))
-        sy2 = min(original_bgr.shape[0], sy + max(1, sh))
+        safe_band = np.zeros(orig_gray_roi.shape[:2], dtype=np.uint8)
+        sx1 = max(0, min(orig_gray_roi.shape[1], sx - rx1))
+        sy1 = max(0, min(orig_gray_roi.shape[0], sy - ry1))
+        sx2 = max(0, min(orig_gray_roi.shape[1], sx + max(1, sw) - rx1))
+        sy2 = max(0, min(orig_gray_roi.shape[0], sy + max(1, sh) - ry1))
         if sx2 > sx1 and sy2 > sy1:
             safe_band[sy1:sy2, sx1:sx2] = 255
             band_width = max(8, min(18, int(min(sw, sh) * 0.06)))
@@ -20656,7 +20820,7 @@ def _enforce_visual_bounds(
         else:
             perimeter_band = allowed
         protected_border_edges = (
-            allowed & perimeter_band & original_edges & ~text_exclusion
+            allowed & perimeter_band & original_edges & ~text_exclusion_bool
         )
         if np.any(protected_border_edges):
             border_change_ratio = float(np.mean(changed[protected_border_edges]))

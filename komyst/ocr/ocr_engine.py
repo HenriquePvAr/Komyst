@@ -2219,6 +2219,73 @@ def _deduplicate_tiled_ocr_lines(lines):
     if fragments:
         duplicates += len(fragments)
         kept = [line for index, line in enumerate(kept) if index not in fragments]
+
+    # Vertical CJK columns cut horizontally across an overlapping tile seam produce
+    # an upper fragment ending with the same 1-6 CJK characters that start the lower
+    # fragment ("約束を守" + "を守るから"). Merge them into one column without repeating
+    # the seam characters.
+    cjk_re = re.compile(r"[\u3040-\u309f\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+    merged_any = True
+    while merged_any and len(kept) >= 2:
+        merged_any = False
+        for i in range(len(kept)):
+            up = kept[i]
+            ux, uy, uw, uh = (int(v) for v in up.box)
+            utext = str(up.text or "").strip()
+            if uw <= 0 or uh < 1.2 * uw or len(utext) < 2 or not cjk_re.search(utext):
+                continue
+            for j in range(i + 1, len(kept)):
+                lo = kept[j]
+                lx, ly, lw, lh = (int(v) for v in lo.box)
+                ltext = str(lo.text or "").strip()
+                if lw <= 0 or lh < 1.2 * lw or len(ltext) < 2 or not cjk_re.search(ltext):
+                    continue
+                if uy > ly:
+                    up_l, lo_l = lo, up
+                    (ux, uy, uw, uh), utext = (lx, ly, lw, lh), ltext
+                    (lx, ly, lw, lh), ltext = (int(v) for v in up.box), str(up.text or "").strip()
+                else:
+                    up_l, lo_l = up, lo
+                x_overlap = min(ux + uw, lx + lw) - max(ux, lx)
+                min_w = max(1, min(uw, lw))
+                if x_overlap < 0.55 * min_w:
+                    continue
+                y_overlap = (uy + uh) - ly
+                if y_overlap < -max(4, int(0.25 * min_w)) or (ly + lh) <= (uy + uh):
+                    continue
+                max_k = min(6, len(utext) - 1, len(ltext) - 1)
+                overlap_k = 0
+                for k in range(max_k, 0, -1):
+                    if utext[-k:] == ltext[:k] and cjk_re.search(utext[-k:]):
+                        if k >= 2 or y_overlap >= 0.35 * min_w:
+                            overlap_k = k
+                            break
+                if not overlap_k:
+                    continue
+                mx1, my1 = min(ux, lx), min(uy, ly)
+                mx2, my2 = max(ux + uw, lx + lw), max(uy + uh, ly + lh)
+                mbox = (mx1, my1, mx2 - mx1, my2 - my1)
+                mpoly = np.asarray(
+                    [[mx1, my1], [mx2, my1], [mx2, my2], [mx1, my2]], dtype=np.float32
+                )
+                joined = utext + ltext[overlap_k:]
+                merged_line = OCRLine(
+                    text=joined,
+                    confidence=min(float(up_l.confidence or 0.0), float(lo_l.confidence or 0.0)),
+                    polygon=mpoly,
+                    box=mbox,
+                    raw_text=joined,
+                    engine=up_l.engine,
+                    page=up_l.page,
+                    metadata=dict(getattr(up_l, "metadata", None) or {}),
+                )
+                kept[i] = merged_line
+                del kept[j]
+                duplicates += 1
+                merged_any = True
+                break
+            if merged_any:
+                break
     return kept, duplicates
 
 
