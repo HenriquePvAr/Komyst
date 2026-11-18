@@ -4392,7 +4392,7 @@ def _line_ignore_reason(line, image_shape):
     x, y, w, h = line.box
 
     if upper not in SHORT_REAL_TEXTS:
-        if len(useful_chars) < 2:
+        if len(useful_chars) < 2 and not _NON_LATIN_SCRIPT_CHARS_RE.search(text):
             return "too_few_useful_chars"
         if re.fullmatch(r"[\W\d_]+", text):
             return "number_or_symbols_only"
@@ -4406,7 +4406,7 @@ def _line_ignore_reason(line, image_shape):
     if w > w_img * 0.96 and h > h_img * 0.35:
         return "box_too_large"
 
-    semantic_span = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", text)
+    semantic_span = re.sub(r"^[^\w]+|[^\w]+$", "", text, flags=re.UNICODE)
     alpha_ratio = len(useful_chars) / max(
         1,
         len(re.sub(r"\s+", "", semantic_span)),
@@ -9341,12 +9341,16 @@ def _lettering_continuation_boxes(image_bgr, lines):
 
 def apply_speech_container_reocr(original_bgr, raw_lines, ocr_lang, page_index=None):
     """Selective re-OCR of under-read lines and gaps, then a masked-page rediscovery."""
+    from komyst.ocr import ocr_models
+
     lines, records = _apply_speech_container_reocr_core(original_bgr, raw_lines, ocr_lang, page_index)
     if (original_bgr is not None and getattr(original_bgr, "size", 0) and lines
             and config.OCR_REGION_SELECTIVE_FALLBACK and config.OCR_MASKED_REDISCOVERY):
         lines, record = _masked_page_rediscovery(original_bgr, lines, ocr_lang, page_index)
         if record:
             records.append(record)
+    if not ocr_models.source_is_english(ocr_lang):
+        return lines, records
     if (original_bgr is not None and getattr(original_bgr, "size", 0) and lines
             and config.OCR_REGION_SELECTIVE_FALLBACK and config.OCR_SPLIT_AT_CROSSING_BORDERS):
         lines, record = _split_lines_at_crossing_borders(original_bgr, lines, ocr_lang, page_index)
@@ -9802,11 +9806,14 @@ def _apply_speech_container_reocr_core(
     if not config.OCR_REGION_SELECTIVE_FALLBACK:
         return lines, records
 
+    from komyst.ocr import ocr_models
+
     underread = [line for line in lines if _line_needs_underread_reocr(line)]
     gaps = [(container_id, box, "speech_container_uncovered_text")
             for container_id, box in _container_text_gap_boxes(original_bgr, lines)]
-    gaps += [(0, box, "lettering_continuation_uncovered_text")
-             for box in _lettering_continuation_boxes(original_bgr, lines)]
+    if ocr_models.source_is_english(ocr_lang):
+        gaps += [(0, box, "lettering_continuation_uncovered_text")
+                 for box in _lettering_continuation_boxes(original_bgr, lines)]
     if not underread and not gaps:
         return lines, records
 

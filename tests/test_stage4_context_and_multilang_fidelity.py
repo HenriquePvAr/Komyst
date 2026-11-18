@@ -53,6 +53,7 @@ def test_translate_batch_includes_bounded_scene_context(monkeypatch):
 def test_single_syllable_non_latin_acknowledgements_are_kept_and_not_weak():
     for txt in ("예,", "예.", "네!", "え?", "好!"):
         line = OCRLine(text=txt, confidence=0.92, polygon=np.zeros((4, 2), dtype=np.float32), box=(20, 20, 48, 42), raw_text=txt)
+        assert ob._line_ignore_reason(line, (2000, 800, 3)) == "", f"expected {txt!r} not to be ignored"
         assert ob._looks_like_noise(txt) is False, f"expected {txt!r} not to be dropped as noise"
         assert ob._is_weak_ocr_line(line) is False, f"expected {txt!r} not to trigger weak-line re-OCR"
 
