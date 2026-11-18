@@ -254,6 +254,7 @@ def _ocr_quantity_reading(text):
     off the word it was glued to.
     """
     text = re.sub(r"(?<=\d)[Oo]+(?![A-Za-z])", lambda m: "0" * len(m.group(0)), str(text or ""))
+    text = re.sub(r"(?<![\d$#])\b1[Ss]\b", "is", text)
     text = re.sub(rf"(?<!\d)(?<!\d[.,])[10](?![\d.,])(?=[A-Za-z]{{2}})(?!{_ORDINAL_SUFFIX})", " ", text, flags=re.I)
     text = re.sub(r"(?<=[A-Za-z]{2})[10](?![\dA-Za-z])", " ", text)
     numbers = sorted((word for word in _SOURCE_CARDINALS if len(word) >= 3), key=len, reverse=True)
@@ -326,6 +327,7 @@ _SOURCE_CARDINALS = {
 }
 _TARGET_CARDINALS = {
     **_TARGET_QUANTITY_WORDS,
+    "primeiro": 1, "primeira": 1,
     "zero": 0, "treze": 13, "quatorze": 14, "quinze": 15,
     "dezesseis": 16, "dezessete": 17, "dezoito": 18, "dezenove": 19,
     "vinte": 20, "trinta": 30, "quarenta": 40, "cinquenta": 50,

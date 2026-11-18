@@ -3064,6 +3064,12 @@ def _is_short_expressive_sfx_text(text: str, *, protected_names=()) -> bool:
     if not cleaned or _NON_LATIN_SCRIPT_CHARS_RE.search(cleaned):
         return False
     words = re.findall(r"[A-Za-z]+", cleaned)
+    if 3 <= len(words) <= 6:
+        # Repeated onomatopoeia ("MUNCH MUINCH MUNCH", "CHOMP CHOMP CHOMP") with minor OCR vowel jitter.
+        roots = {re.sub(r"[AEIOU]+", "*", w.upper()) for w in words}
+        if len(roots) == 1 and any(translate_sfx_fuzzy(w) is not None for w in words):
+            return True
+        return False
     if not (1 <= len(words) <= 2) or sum(len(w) for w in words) > 16:
         return False
     upper_names = {str(n).strip().upper() for n in (protected_names or ()) if str(n).strip()}
@@ -6816,8 +6822,16 @@ def score_group_ocr_quality(group):
         if char.isalpha() and not ("A" <= char.upper() <= "Z")
     ]
     if non_ascii_letters:
-        reasons.append("non_ascii_ocr_artifact")
-        score -= min(0.42, 0.18 + len(non_ascii_letters) * 0.06)
+        folded_words_check = [w for w in re.findall(r"[A-Z]+", _ascii_fold(text).upper()) if len(w) >= 3]
+        single_speck_accent = (
+            len(non_ascii_letters) == 1
+            and ("\u00c0" <= non_ascii_letters[0] <= "\u024f")
+            and len(folded_words_check) >= 3
+            and all(w in COMMON_ENGLISH_WORDS or region_taxonomy.is_english_word(w) for w in folded_words_check)
+        )
+        if not single_speck_accent:
+            reasons.append("non_ascii_ocr_artifact")
+            score -= min(0.42, 0.18 + len(non_ascii_letters) * 0.06)
 
     raw_case_tokens = re.findall(r"[A-Za-z]{5,}", text)
     if any(_case_transition_count(token) >= 3 for token in raw_case_tokens):
@@ -9329,8 +9343,26 @@ def _container_text_gap_boxes(image_bgr, lines):
         if x2 - x1 < 8 or y2 - y1 < 8:
             continue
         crop = gray[y1:y2, x1:x2]
-        # Glyphs are dark on the light inside of a container.
+        # Glyphs are dark on the light inside of a container. Restrict to dark pixels
+        # sitting on the same connected light container paper seeded by ``region_lines``,
+        # so cross-hatching and dark artwork outside the curved balloon outline do not
+        # spawn dozens of false gap re-OCR calls.
         dark = np.where(crop <= 140, 255, 0).astype(np.uint8)
+        light_paper = (crop >= 180).astype(np.uint8)
+        l_count, l_labels = cv2.connectedComponents(light_paper, connectivity=8)
+        seed_labels = set()
+        for rline in region_lines:
+            rx0 = max(0, int(rline.box[0]) - x1 - 4)
+            ry0 = max(0, int(rline.box[1]) - y1 - 4)
+            rx1_l = min(crop.shape[1], int(rline.box[0] + rline.box[2]) - x1 + 4)
+            ry1_l = min(crop.shape[0], int(rline.box[1] + rline.box[3]) - y1 + 4)
+            if rx1_l > rx0 and ry1_l > ry0:
+                vals = np.unique(l_labels[ry0:ry1_l, rx0:rx1_l])
+                seed_labels.update(int(v) for v in vals if v > 0)
+        if seed_labels:
+            interior_paper = np.isin(l_labels, list(seed_labels)).astype(np.uint8)
+            glyph_bed = cv2.dilate(interior_paper, np.ones((9, 9), np.uint8), iterations=1) > 0
+            dark = np.where(glyph_bed, dark, 0)
         # Drop what any recognised line already covers. Every line counts, not
         # only this container's: the crop reaches neighbouring text, and leaving
         # it in would rediscover lines that were read perfectly well.

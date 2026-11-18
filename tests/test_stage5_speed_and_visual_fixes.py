@@ -249,3 +249,45 @@ def test_clamp_horizontal_span_prevents_side_by_side_vertical_balloon_overlap():
     assert cl_left[1] < cl_right[0]
 
 
+def test_english_quantity_ordinals_1s_ocr_speck_and_container_gap_interior_gate():
+    import komyst.translation.semantic_fidelity as sf
+
+    f1 = sf.evaluate_local_fidelity(
+        "WAS HE PLANNING TO KILL THE NEWBIE ON DAY ONE?!",
+        "ELE ESTAVA PLANEJANDO MATAR O NOVATO JÁ NO PRIMEIRO DIA?!",
+        classification="speech",
+        source_lang="en",
+    )
+    assert f1.outcome == sf.FAITHFUL, f1
+
+    f2 = sf.evaluate_local_fidelity(
+        "THIS 1S GREAT! YOU'RE SERIOUSLY INTERESTING!",
+        "ISSO É ÓTIMO! VOCÊ É REALMENTE MUITO INTERESSANTE!",
+        classification="speech",
+        source_lang="en",
+    )
+    assert f2.outcome == sf.FAITHFUL, f2
+
+    speck_txt = "ALL RIGHT, FOR THE SÉCOND BAPTISM, LET'S TRY TO KILL EACH OTHER."
+    speck_line = _mk_line(speck_txt, (10, 10, 260, 60), confidence=0.95)
+    speck_group = ob.TextGroup(group_id="SP1", lines=[speck_line], text=speck_txt)
+    _, speck_reasons = ob.score_group_ocr_quality(speck_group)
+    assert "non_ascii_ocr_artifact" not in speck_reasons
+
+    assert ob._is_short_expressive_sfx_text("MUNCH MUINCH MUNCH MUINCH MUNCH") is True
+
+    # Closed white balloon surrounded by dense cross-hatching outside the black border:
+    # _speech_container_gap_boxes must NOT emit gap boxes for hatching outside the border.
+    page = np.full((300, 300, 3), 245, dtype=np.uint8)
+    for hx in range(20, 280, 10):
+        cv2.rectangle(page, (hx, 20), (hx + 4, 38), (40, 40, 40), -1)
+        cv2.rectangle(page, (hx, 240), (hx + 4, 258), (40, 40, 40), -1)
+    cv2.ellipse(page, (150, 140), (95, 75), 0, 0, 360, (252, 252, 252), -1)
+    cv2.ellipse(page, (150, 140), (95, 75), 0, 0, 360, (15, 15, 15), 4)
+    inside_line = _mk_line("HELLO THERE", (95, 115, 110, 36))
+    inside_line.metadata = {"visual_white_region_id": 1}
+    gaps = ob._speech_container_gap_boxes(page, [inside_line])
+    assert gaps == []
+
+
+
