@@ -1,0 +1,24 @@
+name: Sugerir melhoria / Suggest an improvement
+description: Proponha uma melhoria para um fluxo do Komyst / Propose a workflow improvement
+body:
+  - type: markdown
+    attributes:
+      value: "Esta issue é pública. Inclua só detalhes que possam ser compartilhados."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema atual / Current problem
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Funcionalidade sugerida / Proposed feature
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Caso de uso e benefício / Use case and expected benefit
+    validations:
+      required: true

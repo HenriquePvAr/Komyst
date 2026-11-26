@@ -2,8 +2,24 @@
 
 # Komyst
 
-[Official website](https://komyst.com.br/) · [Beta program](https://komyst.com.br/#download) · [Benchmarks](https://komyst.com.br/benchmarks.html) · [Português](README.md)
+[Official website](https://komyst.com.br/) · [Join the Beta program](https://komyst.com.br/#download) · [Português](README.md)
 
-Komyst is a Windows application for reading, translating, cleaning up, and editing comics. Readers can prepare chapters for PDF or PNG export. Editorial teams can generate cleaned pages and work with layered PSD files, depending on the export profile.
+**Visual processing, translation and editing for manga, manhwa, manhua and webcomics on Windows.**
 
-Visual processing runs on your computer. Online translation sends the text needed to process the request. Beta access is rolling out gradually. See the [Privacy Policy](https://komyst.com.br/privacidade.html) for details on data handling.
+Komyst recognizes text, cleans page regions, reconstructs artwork and applies translations in a workflow that produces files for reading or review. Early access is rolling out by invitation.
+
+| Who it is for | How to use it |
+| --- | --- |
+| Readers | Import local pages or request content from a compatible source. Prepare the chapter and export PDF or PNG files to read on a computer, phone or tablet. |
+| Scanlation teams and editors | Generate cleaned pages, review translations and export layered PSD with original art, cleaned art and type, depending on the output profile. |
+
+- [Editorial demo](samples/README.md#english) and [app screenshots](docs/en/getting-started.md#interface).
+- [Getting started](docs/en/getting-started.md), [features and languages](docs/en/capabilities.md) and [conceptual architecture](docs/en/architecture.md).
+- [Internal benchmarks](docs/en/benchmarks.md) and [editorial workflow](docs/en/editorial-workflow.md).
+- [Roadmap](ROADMAP.md#english), [changelog](CHANGELOG.md#english), [support](SUPPORT.md#english) and [security](SECURITY.md#english).
+
+Seven internal runs processed 394 logical pages. The lowest observed average was **4.43 s per page**. The methodology explains what was counted and which details were unavailable. Complex pages, stylized sound effects and text over artwork can require review.
+
+Pages and exports stay on the device in the local workflow. Online translation sends the required text and can retain textual results for resuming work. The model uses one YK credit per chapter processed, regardless of page count, subject to the application's technical limits. [Privacy](https://komyst.com.br/privacidade.html) · [Pricing and credits](https://komyst.com.br/precos.html).
+
+This repository contains public product documentation. [Rights and terms for the materials](NOTICE.md#english).

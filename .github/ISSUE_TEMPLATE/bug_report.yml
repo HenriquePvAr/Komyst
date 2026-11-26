@@ -1,0 +1,41 @@
+name: Relatar problema / Report a problem
+description: Conte o que falhou no Komyst / Describe what failed
+body:
+  - type: markdown
+    attributes:
+      value: "Esta issue é pública. Omita tokens, chaves, licenças, endereços pessoais, logs privados e páginas protegidas. Vulnerabilidades devem seguir https://github.com/HenriquePvAr/Komyst/security/policy."
+  - type: input
+    id: environment
+    attributes:
+      label: Versão e sistema / Version and OS
+      placeholder: "Versão do Komyst · edição e versão do Windows"
+    validations:
+      required: true
+  - type: input
+    id: area
+    attributes:
+      label: Funcionalidade afetada / Affected feature
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: O que ocorreu / What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: O que esperava / What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Passos de reprodução / Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Informações técnicas públicas / Non-sensitive details
