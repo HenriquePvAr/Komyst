@@ -2,7 +2,7 @@
 
 # Komyst
 
-[Site oficial](https://komyst.com.br/) · [Participar do Programa Beta](https://komyst.com.br/#download) · [English](README.en.md)
+[Site oficial](https://komyst.com.br/) · [Participar do Programa Beta](https://komyst.com.br/#download) · [Contato](https://komyst.com.br/contato.html) · [English](README.en.md)
 
 **Processamento visual, tradução e edição de mangás, manhwas, manhuas e webtoons no Windows.**
 
